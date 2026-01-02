@@ -1,0 +1,4 @@
+github.com/bazelbuild/buildtools v0.0.0-20251231073631-eb7356da6895 h1:EWOZOFbxzZX5jTNN+ddRKOyrhVzEaUHyTHl8/2LHXkw=
+github.com/bazelbuild/buildtools v0.0.0-20251231073631-eb7356da6895/go.mod h1:PLNUetjLa77TCCziPsz0EI8a6CUxgC+1jgmWv0H25tg=
+github.com/bazelbuild/rules_go v0.46.0 h1:CTefzjN/D3Cdn3rkrM6qMWuQj59OBcuOjyIp3m4hZ7s=
+github.com/bazelbuild/rules_go v0.46.0/go.mod h1:Dhcz716Kqg1RHNWos+N6MlXNkjNP2EwZQ0LukRKJfMs=

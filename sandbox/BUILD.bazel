@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "runner_lib",
+    srcs = ["runner.go", "copier.go"],
+    importpath = "github.com/nix-bazel-via-bwrap/sandbox",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "runner",
+    embed = [":runner_lib"],
+    visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "symlink_test",
+    srcs = ["symlink_test.sh"],
+    data = [":runner"],
+)

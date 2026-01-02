@@ -1,0 +1,4 @@
+build --experimental_output_paths=strip
+# Reduce timeout to fail faster on bad mirrors
+build --jvmopt=-Dsun.net.client.defaultConnectTimeout=5000
+build --jvmopt=-Dsun.net.client.defaultReadTimeout=30000

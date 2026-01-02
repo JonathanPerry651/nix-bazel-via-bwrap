@@ -1,0 +1,24 @@
+{
+    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-2.10.drv": {
+        "outputs": {
+            "out": {
+                "path": "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-hello-2.10"
+            }
+        },
+        "inputSrcs": [
+            "/nix/store/cccccccccccccccccccccccccccccccc-hello.c"
+        ],
+        "inputDrvs": {},
+        "platform": "x86_64-linux",
+        "builder": "bash",
+        "args": [
+            "-c",
+            "gcc hello.c -o $out"
+        ],
+        "env": {
+            "name": "hello-2.10",
+            "builder": "bash",
+            "system": "x86_64-linux"
+        }
+    }
+}
