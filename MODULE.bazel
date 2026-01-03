@@ -10,8 +10,7 @@ bazel_dep(name = "rules_shell", version = "0.2.0")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-
-use_repo(go_deps, "com_github_bazelbuild_rules_go", "com_github_bazelbuild_buildtools")
+use_repo(go_deps, "com_github_bazelbuild_buildtools", "com_github_ulikunitz_xz")
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
@@ -112,3 +111,7 @@ use_repo(nix_deps, "nix_source_texinfo_7_2_tar_xz")
 use_repo(nix_deps, "nix_source_which_2_23_tar_gz")
 use_repo(nix_deps, "nix_source_xz_5_8_1_tar_xz")
 use_repo(nix_deps, "nix_source_zlib_1_3_1_tar_gz")
+
+nix_lock = use_extension("//:extensions.bzl", "nix_lock_ext")
+nix_lock.from_file(lockfile = "//:nix.lock")
+use_repo(nix_lock, "nix_cache")

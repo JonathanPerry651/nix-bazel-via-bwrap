@@ -1,0 +1,4 @@
+sh_binary(
+    name = "hello",
+    srcs = ["@nix_cache//tests/manual/hello:bin/hello"],
+)

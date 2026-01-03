@@ -1,0 +1,26 @@
+sh_test(
+    name = "test_e2e",
+    srcs = ["test_e2e.sh"],
+    data = [
+        "//:distribution",
+    ],
+    tags = ["local", "requires-network"],
+    timeout = "long",
+)
+
+sh_test(
+    name = "test_cache_miss",
+    srcs = ["test_cache_miss.sh"],
+    data = [
+        "//:distribution",
+        "//tests/manual/cache_miss:flake.nix",
+    ],
+    tags = ["local", "requires-network"],
+    timeout = "long",
+)
+
+sh_test(
+    name = "probe_nix",
+    srcs = ["probe_nix.sh"],
+    tags = ["local", "requires-network"],
+)

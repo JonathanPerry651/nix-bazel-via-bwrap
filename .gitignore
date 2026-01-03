@@ -1,29 +1,21 @@
 # Bazel
-/bazel-*
+bazel-*
 .bazelrc.user
-.bazelrc.cred
+.bazelversion
+
+# Nix
+result
+nix-generator-home*
+.nix-portable
+nix-portable
+nix.lock.bak
+
+
+# Editor
+.vscode
+.idea
+*.swp
 
 # Go
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
-
-# Editor/IDE
-.vscode/
-.idea/
-*.swp
-*~
-.DS_Store
-
-# Project specific
-/fake_home/
-/nix-portable
+dist/
+bin/

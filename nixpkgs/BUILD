@@ -9772,3 +9772,4 @@ nix_derivation(
         "out": "1ln5zvydmijvra2288f5rlf17g3lbsp2-libssh2-1.11.1",
     },
 )
+filegroup(name = "all_files", srcs = glob(["**"]), visibility = ["//visibility:public"])

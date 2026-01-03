@@ -111,3 +111,4 @@ exports_files([
     "zi0m9pfmvy5lw89x7a8x674rm99i8qiq-setup-hook.sh",
     "znnnjr9ym1v5am6adg4x3pl0l6zx6xqk-setup-hook.sh",
 ])
+filegroup(name = "all_files", srcs = glob(["**"]), visibility = ["//visibility:public"])

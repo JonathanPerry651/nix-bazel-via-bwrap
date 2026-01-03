@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "nix_tool_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/JonathanPerry651/nix-bazel-via-bwrap/cmd/nix_tool",
+    visibility = ["//visibility:private"],
+    deps = ["//cache"],
+)
+
+go_binary(
+    name = "nix_tool",
+    embed = [":nix_tool_lib"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)

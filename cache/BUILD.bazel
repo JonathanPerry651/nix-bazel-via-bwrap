@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cache",
+    srcs = [
+        "cache.go",
+        "lockfile.go",
+        "narinfo.go",
+        "unpack.go",
+    ],
+    importpath = "github.com/JonathanPerry651/nix-bazel-via-bwrap/cache",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_ulikunitz_xz//:xz"],
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)

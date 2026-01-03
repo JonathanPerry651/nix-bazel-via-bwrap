@@ -35,7 +35,7 @@ type GeneratedArtifacts struct {
 	NixDepsUseRepoBzl []byte
 }
 
-func (g *BazelGenerator) Generate(graph Graph) (*GeneratedArtifacts, error) {
+func (g *BazelGenerator) Generate(graph Graph, packageName string) (*GeneratedArtifacts, error) {
 	// Map output paths to target names for dependency resolution
 	storePathToTarget := make(map[string]string)
 	// Map output paths to external labels (for http_file)
@@ -107,6 +107,14 @@ func (g *BazelGenerator) Generate(graph Graph) (*GeneratedArtifacts, error) {
 			return nil, err
 		}
 		rules = append(rules, ruleExpr)
+	}
+
+	// Add alias for the requested package
+	if packageName != "" {
+		aliasRule := g.generateAliasForPackage(graph, packageName, sortedDrvs)
+		if aliasRule != nil {
+			rules = append(rules, aliasRule)
+		}
 	}
 
 	// Generate artifacts
@@ -526,4 +534,44 @@ func (g *BazelGenerator) generateNixDepsUseRepo(httpFiles []HttpFileDef) []byte 
 		useRepoLines = append(useRepoLines, fmt.Sprintf("use_repo(nix_deps, \"%s\")", name))
 	}
 	return []byte(strings.Join(useRepoLines, "\n"))
+}
+
+// generateAliasForPackage generates an alias rule for the requested package.
+// It finds the derivation whose pname matches the requested package and creates
+// an alias from the short name to the full hash-prefixed target name.
+func (g *BazelGenerator) generateAliasForPackage(graph Graph, packageName string, sortedDrvs []string) build.Expr {
+	// Find the derivation with matching pname (the main output, not source tarballs etc.)
+	for _, drvPath := range sortedDrvs {
+		drv := graph[drvPath]
+
+		// Skip fetchurl derivations
+		if drv.Builder == "builtin:fetchurl" {
+			continue
+		}
+
+		pname := drv.Env["pname"]
+		if pname == packageName {
+			// This is our package! Extract the target name
+			targetName := strings.TrimSuffix(filepath.Base(drvPath), ".drv")
+
+			// Generate the alias rule:
+			// alias(
+			//     name = "hello",
+			//     actual = ":72pl0rs7xi7vsniia10p7q8vl7f36xaw-hello-2.12.2",
+			// )
+			return &build.CallExpr{
+				X: &build.Ident{Name: "alias"},
+				List: []build.Expr{
+					&build.AssignExpr{LHS: &build.Ident{Name: "name"}, Op: "=", RHS: &build.StringExpr{Value: packageName}},
+					&build.AssignExpr{LHS: &build.Ident{Name: "actual"}, Op: "=", RHS: &build.StringExpr{Value: ":" + targetName}},
+				},
+			}
+		}
+	}
+
+	// Also check for version-suffixed pname (e.g., pname="hello", but name includes version)
+	// This is already handled by the primary loop since we match on pname directly.
+
+	log.Printf("Warning: Could not find derivation with pname='%s' to create alias", packageName)
+	return nil
 }

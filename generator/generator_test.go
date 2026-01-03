@@ -47,7 +47,7 @@ func TestBazelGenerator_SimpleRule(t *testing.T) {
 		},
 	}
 
-	result, err := generator.Generate(graph)
+	result, err := generator.Generate(graph, "")
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestBazelGenerator_HttpFile(t *testing.T) {
 		},
 	}
 
-	result, err := generator.Generate(graph)
+	result, err := generator.Generate(graph, "")
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestGenerator_Golden(t *testing.T) {
 	// Mock nix portable path not used unless hash conversion needed, which we should avoid in golden test input
 	generator := NewBazelGenerator(indexer, copier, "mock-nix")
 
-	result, err := generator.Generate(graph)
+	result, err := generator.Generate(graph, "")
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -162,8 +162,8 @@ func TestBazelGenerator_Idempotency(t *testing.T) {
 		},
 	}
 
-	res1, _ := generator.Generate(graph)
-	res2, _ := generator.Generate(graph)
+	res1, _ := generator.Generate(graph, "")
+	res2, _ := generator.Generate(graph, "")
 
 	if string(res1.BuildFile) != string(res2.BuildFile) {
 		t.Error("Idempotency failure: BuildFile differs between runs")

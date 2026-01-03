@@ -87,7 +87,7 @@ func main() {
 
 	// 4. Generate Build Artifacts
 	builder := NewBazelGenerator(indexer, copier, nixPortablePath)
-	artifacts, err := builder.Generate(graph)
+	artifacts, err := builder.Generate(graph, packageName)
 	if err != nil {
 		log.Fatalf("Failed to generate artifacts: %v", err)
 	}

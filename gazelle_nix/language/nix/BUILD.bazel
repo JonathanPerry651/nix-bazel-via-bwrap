@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "nix",
+    srcs = [
+        "config.go",
+        "generate.go",
+        "lang.go",
+        "resolve.go",
+    ],
+    importpath = "github.com/JonathanPerry651/nix-bazel-via-bwrap/gazelle_nix/language/nix",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//cache",
+        "@gazelle//config",
+        "@gazelle//label",
+        "@gazelle//language",
+        "@gazelle//repo",
+        "@gazelle//resolve",
+        "@gazelle//rule",
+    ],
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)

@@ -6,6 +6,8 @@ def _nix_derivation_impl(ctx):
     primary_name = ctx.label.name
     all_outputs = []
     store_names = ctx.attr.store_names
+    if not store_names:
+        store_names = {"out": primary_name}
     fake_outputs = {}
     primary_fake = None
     
@@ -39,7 +41,7 @@ def _nix_derivation_impl(ctx):
     for k, v in ctx.attr.source_mappings.items():
         if ":" in k or k.startswith("/") or k.startswith("@"):
             lbl = ctx.label.relative(k)
-            print("DEBUG: Mapping string %s to Label %s" % (k, lbl))
+
             resolved_source_mappings[lbl] = v
         else:
             resolved_source_mappings[k] = v
@@ -53,7 +55,7 @@ def _nix_derivation_impl(ctx):
             closure_parts.append(src.files)
             # For files from nix_sources or external sources, use source_mappings
             # We match by label (Canonical Label comparison) or basename
-            print("DEBUG: Checking src %s" % src.label)
+
             for f in src.files.to_list():
                 matched_p = None
                 
@@ -63,10 +65,10 @@ def _nix_derivation_impl(ctx):
                     matched_p = resolved_source_mappings[f.basename]
                 
                 if matched_p:
-                    print("DEBUG: matched f=%s to p=%s" % (f.path, matched_p))
+
                     store_paths[f] = matched_p
                 else:
-                    print("DEBUG: no match for f=%s (basename=%s)" % (f.path, f.basename))
+
 
     full_closure = depset(
         direct = all_outputs + ctx.files.srcs,
@@ -144,4 +146,81 @@ nix_derivation = rule(
             cfg = "exec",
         ),
     },
+)
+
+def _nix_nar_unpack_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.attr.name)
+    
+    args = ctx.actions.args()
+    args.add("-src", ctx.file.src)
+    args.add("-dest", out.path)
+    args.add("-compression", ctx.attr.compression)
+    
+    ctx.actions.run(
+        outputs = [out],
+        inputs = [ctx.file.src],
+        executable = ctx.executable._tool,
+        arguments = [args],
+        mnemonic = "NixNarUnpack",
+        progress_message = "Unpacking NAR %s" % ctx.file.src.short_path,
+        use_default_shell_env = True,
+    )
+    
+    return [DefaultInfo(files = depset([out]))]
+
+nix_nar_unpack = rule(
+    implementation = _nix_nar_unpack_impl,
+    attrs = {
+        "src": attr.label(allow_single_file = True, mandatory = True),
+        "compression": attr.string(default = "xz", values = ["xz", "bzip2", "none"]),
+        "_tool": attr.label(
+            default = Label("//cmd/nix_tool"),
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
+def _nix_binary_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".bash")
+    
+    runfiles = ctx.runfiles(files = [ctx.executable._runner])
+    for target in ctx.attr.mounts:
+        runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
+        runfiles = runfiles.merge(ctx.runfiles(transitive_files = target[DefaultInfo].files))
+        
+    mount_flags = []
+    for target, mount_path in ctx.attr.mounts.items():
+        f = target[DefaultInfo].files.to_list()[0]
+        # Use workspace_name for correct runfiles path if needed?
+        # f.short_path usually "repo_name/path" or "path" (if main)
+        # We rely on Runner finding it via simple path in runfiles
+        mount_flags.append("--mount")
+        mount_flags.append('"$RUNFILES/%s":%s' % (f.short_path, mount_path))
+
+    content = """#!/bin/bash
+RUNFILES=${RUNFILES_DIR:-$0.runfiles}
+if [ ! -d "$RUNFILES" ]; then
+    RUNFILES=${0}.runfiles
+fi
+if [ -d "$RUNFILES/_main" ]; then
+    RUNFILES="$RUNFILES/_main"
+fi
+
+RUNNER="$RUNFILES/%s"
+
+exec "$RUNNER" "%s" "." %s -- "$@"
+""" % (ctx.executable._runner.short_path, ctx.attr.exe_path, " ".join(mount_flags))
+
+    ctx.actions.write(out, content, is_executable = True)
+    return [DefaultInfo(executable = out, runfiles = runfiles)]
+
+nix_binary = rule(
+    implementation = _nix_binary_impl,
+    attrs = {
+        "mounts": attr.label_keyed_string_dict(allow_files = True),
+        "exe_path": attr.string(),
+        "_runner": attr.label(default = Label("//sandbox:runner"), executable = True, cfg = "target"),
+    },
+    executable = True,
 )
