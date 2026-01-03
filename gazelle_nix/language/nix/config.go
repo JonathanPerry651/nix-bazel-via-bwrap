@@ -27,6 +27,14 @@ type NixConfig struct {
 	// CacheName specifies the name of the repository where cached artifacts are stored.
 	// Defaults to "nix_cache".
 	CacheName string
+	// NixpkgsLabel specifies a Bazel label (e.g. @nixpkgs//:src) pointing to the nixpkgs source.
+	// If set, this is resolved to an absolute path via runfiles and passed to nix show-derivation.
+	NixpkgsLabel string
+}
+
+func (c *NixConfig) Clone() *NixConfig {
+	newConfig := *c
+	return &newConfig
 }
 
 // GetNixConfig returns the NixConfig for a given config.Config.
@@ -45,7 +53,7 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 	if rel == "" {
 		l.mu.Lock()
 		if !l.initialized {
-			l.lockPath = filepath.Join(c.RepoRoot, "nix.lock")
+			l.lockPath = filepath.Join(c.RepoRoot, "nix_deps", "nix.lock")
 			lf, err := cache.LoadLockFile(l.lockPath)
 			if err != nil {
 				// Don't fail hard, just warn.
@@ -57,15 +65,17 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 		l.mu.Unlock()
 	}
 
-	cfg, ok := c.Exts[nixName].(*NixConfig)
-	if !ok {
+	var cfg *NixConfig
+	if extra, ok := c.Exts[nixName]; ok {
+		cfg = extra.(*NixConfig).Clone()
+	} else {
 		cfg = &NixConfig{
 			Enabled:        true,
 			ExecutableMode: "auto",
 			CacheName:      "nix_cache",
 		}
-		c.Exts[nixName] = cfg
 	}
+	c.Exts[nixName] = cfg
 
 	// Process directives
 	if f != nil {
@@ -79,6 +89,8 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 				cfg.NixpkgsCommit = d.Value
 			case "nix_cache_name":
 				cfg.CacheName = d.Value
+			case "nix_nixpkgs_label":
+				cfg.NixpkgsLabel = d.Value
 			}
 		}
 	}

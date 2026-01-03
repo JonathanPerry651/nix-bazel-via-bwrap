@@ -63,8 +63,8 @@ func (*nixLang) Kinds() map[string]rule.KindInfo {
 func (*nixLang) Loads() []rule.LoadInfo {
 	return []rule.LoadInfo{
 		{
-			Name:    "@rules_nix//:defs.bzl",
-			Symbols: []string{"nix_package"},
+			Name:    "@nix_bazel_via_bwrap//:rules.bzl",
+			Symbols: []string{"nix_package", "nix_binary"},
 		},
 	}
 }

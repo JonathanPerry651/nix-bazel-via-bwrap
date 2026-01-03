@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "flakes": {
+    "//tests/manual/cache_miss:default": {
+      "drv_hash": "",
+      "output_store_path": "",
+      "runtime_closure": [
+        ""
+      ]
+    }
+  },
+  "sources": {},
+  "store_paths": {}
+}

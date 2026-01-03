@@ -6,12 +6,187 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/JonathanPerry651/nix-bazel-via-bwrap/cache"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/bazelbuild/rules_go/go/runfiles"
 )
+
+// resolveLabelToRunfiles converts a Bazel label (e.g. @repo//pkg:target) to an absolute runfiles path.
+// It assumes the target is a file or directory mapped into runfiles.
+func resolveLabelToRunfiles(label string) (string, error) {
+	// Heuristic parsing of label to runfiles path:
+	// @repo//pkg:target -> repo/pkg/target
+	// //pkg:target -> <main_workspace>/pkg/target (TODO: cleaner main workspace detection)
+
+	// For now, assume strict form: @repo//pkg:name for external, and relative for local?
+	// Actually, Rlocation expects "repo/pkg/file".
+
+	// Simplify: just strip '@' and Replace '//' with '/' and ':' with '/'
+	// This is very rough but matches standard structure for file targets.
+	// @nixpkgs//:src -> nixpkgs/src (if mapped correctly)
+
+	// We only support external repos cleanly for now as per use case (@nixpkgs//...)
+	path := label
+	if len(path) > 0 && path[0] == '@' {
+		path = path[1:]
+	}
+	path = filepath.Clean(path)
+	// Replace // with /
+	// Replace : with /
+	// This isn't perfect label parsing but often sufficient for filegroup/file references.
+
+	// Better: use strings.Replace
+	// path = strings.ReplaceAll(path, "//", "/")
+	// path = strings.ReplaceAll(path, ":", "/")
+
+	// Note: In runfiles, external repos are just top level dirs usually.
+	// e.g. "nixpkgs/..."
+
+	r, err := runfiles.New()
+	if err != nil {
+		return "", err
+	}
+
+	// Let's implement a very simple parser compatible with Rlocation expectations
+	// Input: @nixpkgs//:src
+	// Expect: nixpkgs/src (if that's where it is)
+	// Actually, http_archive with generated build file...
+	// If output is tree artifact, it's just the dir.
+
+	// Using a manual simple transform for the prototype:
+	// Remove leading @
+	s := label
+	if s[0] == '@' {
+		s = s[1:]
+	}
+	// Replace // with /
+	// Replace : with /
+	// This converts @r//p:t -> r/p/t
+	targetPath := ""
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '/' && i+1 < len(runes) && runes[i+1] == '/' {
+			targetPath += "/"
+			i++ // skip next /
+		} else if runes[i] == ':' {
+			targetPath += "/"
+		} else {
+			targetPath += string(runes[i])
+		}
+	}
+	targetPath = filepath.Clean(targetPath)
+
+	// log.Printf("DEBUG: resolving %q -> %q", label, targetPath)
+	loc, err := r.Rlocation(targetPath)
+	if err == nil {
+		return checkFileOrDir(loc)
+	}
+
+	// Bzlmod repo name mangling support.
+	// The label provided by the user (e.g. @nixpkgs) might be an apparent name,
+	// but Rlocation expects a canonical name.
+	// We try to resolve the repository part of the path using the _repo_mapping file.
+	if err != nil {
+		parts := strings.SplitN(targetPath, "/", 2)
+		if len(parts) == 2 {
+			repoName := parts[0]
+			rest := parts[1]
+
+			canonical, ok := resolveRepoName(r, repoName)
+			if ok {
+				remappedPath := canonical + "/" + rest
+				loc, err := r.Rlocation(remappedPath)
+				if err == nil {
+					return checkFileOrDir(loc)
+				}
+			}
+		}
+	}
+
+	if err != nil {
+		log.Printf("Warning: Rlocation failed for %q: %v", targetPath, err)
+		return "", err
+	}
+	return checkFileOrDir(loc)
+}
+
+func checkFileOrDir(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		return filepath.Dir(path), nil
+	}
+	return path, nil
+}
+
+// resolveRepoName attempts to find the canonical name for a given repository name
+// by inspecting the _repo_mapping file in the runfiles root.
+func resolveRepoName(r *runfiles.Runfiles, repo string) (string, bool) {
+	// Find _repo_mapping file.
+	// It is located at the top of the runfiles tree.
+	// We can guess its location relative to a known file or try Rlocation("_repo_mapping").
+	// Rlocation("_repo_mapping") works if the tool itself includes it as data? Usually implicit.
+
+	mappingPath, err := r.Rlocation("_repo_mapping")
+	if err != nil {
+		// Fallback: Use env var RUNFILES_DIR if available?
+		// Or RUNFILES_MANIFEST_FILE and replace MANIFEST with _repo_mapping?
+		manifest := os.Getenv("RUNFILES_MANIFEST_FILE")
+		if manifest != "" {
+			// manifest usually <...>/MANIFEST
+			mappingPath = filepath.Join(filepath.Dir(manifest), "_repo_mapping")
+			log.Printf("DEBUG: _repo_mapping not found via Rlocation, trying manifest sibling: %s", mappingPath)
+		} else {
+			log.Printf("DEBUG: _repo_mapping not found and no manifest env var")
+			return "", false
+		}
+	} else {
+		log.Printf("DEBUG: Found _repo_mapping via Rlocation at %s", mappingPath)
+	}
+
+	content, err := os.ReadFile(mappingPath)
+	if err != nil {
+		log.Printf("DEBUG: Failed to read _repo_mapping: %v", err)
+		return "", false
+	}
+
+	// Format of _repo_mapping:
+	// <source_repo>,<apparent_name>,<canonical_name>
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) >= 3 {
+			// We assume we are looking up from the main repository context (source_repo == "")
+			// or potentially the current module's context if we knew it.
+			// Given we are running as a tool in the workspace root, "" is the most likely context
+			// for user-provided labels like @nixpkgs.
+			source := parts[0]
+			apparent := parts[1]
+			canonical := parts[2]
+
+			// log.Printf("DEBUG: Mapping: %q [%q] -> %q", source, apparent, canonical)
+
+			if source == "" && apparent == repo {
+				// log.Printf("DEBUG: Resolved repo %q -> %q (canonical)", repo, canonical)
+				return canonical, true
+			}
+		}
+	}
+
+	log.Printf("DEBUG: Repo %q not found in _repo_mapping", repo)
+	return "", false
+}
+
+func splitLabel(l string) []string {
+	return nil // unused placeholder
+}
 
 // GenerateArgs contains arguments for rule generation.
 type GenerateArgs = language.GenerateArgs
@@ -50,7 +225,18 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 	}
 
 	// Resolve derivation to get output hash
-	storePath, drvHash, err := resolveFlakeOutput(args.Config, args.Dir, cfg.NixpkgsCommit)
+	nixpkgsOverride := ""
+	if cfg.NixpkgsLabel != "" {
+		if path, err := resolveLabelToRunfiles(cfg.NixpkgsLabel); err != nil {
+			log.Printf("Warning: failed to resolve NixpkgsLabel %q: %v", cfg.NixpkgsLabel, err)
+		} else {
+			nixpkgsOverride = "path:" + path
+		}
+	} else if cfg.NixpkgsCommit != "" {
+		nixpkgsOverride = "github:NixOS/nixpkgs/" + cfg.NixpkgsCommit
+	}
+
+	storePath, drvHash, err := resolveFlakeOutput(args.Config, args.Dir, nixpkgsOverride)
 	if err != nil {
 		log.Printf("Warning: failed to resolve derivation for %s: %v", args.Dir, err)
 	} else {
@@ -99,7 +285,7 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 }
 
 // resolveFlakeOutput runs nix show-derivation to find the output store path and derivation hash.
-func resolveFlakeOutput(c *config.Config, dir string, nixpkgsCommit string) (storePath string, drvHash string, err error) {
+func resolveFlakeOutput(c *config.Config, dir string, nixpkgsOverride string) (storePath string, drvHash string, err error) {
 	nixPortable := findNixPortable(c)
 	if nixPortable == "" {
 		return "", "", nil
@@ -111,8 +297,8 @@ func resolveFlakeOutput(c *config.Config, dir string, nixpkgsCommit string) (sto
 		"--extra-experimental-features", "nix-command flakes",
 		"show-derivation", dir + "#default",
 	}
-	if nixpkgsCommit != "" {
-		args = append(args, "--override-input", "nixpkgs", "github:NixOS/nixpkgs/"+nixpkgsCommit)
+	if nixpkgsOverride != "" {
+		args = append(args, "--override-input", "nixpkgs", nixpkgsOverride)
 	}
 
 	cmd := exec.Command(nixPortable, args...)
@@ -220,20 +406,34 @@ func (l *nixLang) crawlClosure(rootPath string) ([]string, error) {
 
 // findNixPortable locates the nix-portable binary.
 func findNixPortable(c *config.Config) string {
-	// Try common locations
-	candidates := []string{
-		filepath.Join(c.RepoRoot, "nix-portable"),
-		filepath.Join(c.RepoRoot, "bazel-bin/external/nix_portable/file/nix-portable"),
-	}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
+	r, err := runfiles.New()
+	if err == nil {
+		// http_file rule "@nix_portable" creates a target "@nix_portable//file"
+		// which usually maps to "nix_portable/file/nix-portable" in runfiles (depending on mapping).
+		// Try resolving likely labels.
+		candidates := []string{
+			"nix_portable/file/nix-portable",                     // Default module mapping
+			"nix_bazel_via_bwrap/nix_portable/file/nix-portable", // If rooted in main repo
+			// "nix_portable/nix-portable", // sometimes simplified?
+		}
+
+		for _, p := range candidates {
+			loc, err := r.Rlocation(p)
+			if err == nil {
+				// Check simple stat
+				if _, err := os.Stat(loc); err == nil {
+					// log.Printf("DEBUG: Found nix-portable at %s", loc)
+					return loc
+				}
+			}
 		}
 	}
+
 	// Fallback to system nix
+	if p, err := exec.LookPath("nix"); err == nil {
 		return p
 	}
-	log.Printf("Warning: nix not found in candidates or path")
+	log.Printf("Warning: nix not found in runfiles or path")
 	return ""
 }
 

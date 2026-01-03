@@ -14,7 +14,6 @@ Key features:
 ## Prerequisites
 
 - **Bazel**: version 7.x+ (bzlmod enabled)
-- **Nix**: Installed on the system (for cache population and initial evaluation).
 - **Bubblewrap (`bwrap`)**: Required for the sandbox execution.
 
 ## Setup
@@ -52,15 +51,17 @@ gazelle_binary(
 )
 ```
 
-## Usage
+### Example: Manual Reproduction Scaffold
 
-Run Gazelle to generate build files for your flakes:
+A minimal example is available in `tests/manual_repro_scaffold`. You can use it as a template for your own projects.
 
 ```bash
+cp -r tests/manual_repro_scaffold my_project
+cd my_project
+# Update MODULE.bazel to point to the correct repo path or use http_archive
 bazel run //:gazelle
+bazel build //hello:hello
 ```
-
-This will find `flake.nix` files and generate `nix_package` targets.
 
 ## Running Tests
 

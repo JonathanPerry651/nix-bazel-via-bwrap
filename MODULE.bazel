@@ -7,6 +7,11 @@ bazel_dep(name = "bazel_skylib", version = "1.5.0")
 bazel_dep(name = "rules_go", version = "0.57.0")
 bazel_dep(name = "gazelle", version = "0.45.0")
 bazel_dep(name = "rules_shell", version = "0.2.0")
+bazel_dep(name = "rules_bazel_integration_test", version = "0.34.0")
+
+bazel_binaries = use_extension("@rules_bazel_integration_test//:extensions.bzl", "bazel_binaries")
+bazel_binaries.download(version = "7.4.1")
+use_repo(bazel_binaries, "build_bazel_bazel_7_4_1")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
@@ -113,5 +118,5 @@ use_repo(nix_deps, "nix_source_xz_5_8_1_tar_xz")
 use_repo(nix_deps, "nix_source_zlib_1_3_1_tar_gz")
 
 nix_lock = use_extension("//:extensions.bzl", "nix_lock_ext")
-nix_lock.from_file(lockfile = "//:nix.lock")
+nix_lock.from_file(lockfile = "//nix_deps:nix.lock")
 use_repo(nix_lock, "nix_cache")

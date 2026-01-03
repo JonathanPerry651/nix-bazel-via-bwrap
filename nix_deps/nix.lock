@@ -1,6 +1,13 @@
 {
   "version": 1,
   "flakes": {
+    "//tests/manual/cache_miss:default": {
+      "drv_hash": "x8jr92c6pl6zxbl6zqi9qmxp89rc365b",
+      "output_store_path": "/nix/store/y444cql8qq65srq29i2jlrgq26amb227-simple-drv",
+      "runtime_closure": [
+        "/nix/store/y444cql8qq65srq29i2jlrgq26amb227-simple-drv"
+      ]
+    },
     "//tests/manual/hello:default": {
       "drv_hash": "72pl0rs7xi7vsniia10p7q8vl7f36xaw",
       "output_store_path": "/nix/store/i3zw7h6pg3n9r5i63iyqxrapa70i4v5w-hello-2.12.2",

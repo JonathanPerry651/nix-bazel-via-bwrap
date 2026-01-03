@@ -1,0 +1,19 @@
+load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
+
+gazelle_binary(
+    name = "gazelle_bin",
+    languages = [
+        "@gazelle//language/go",
+        "@nix_bazel_via_bwrap//gazelle_nix/language/nix",
+    ],
+)
+
+# gazelle:nix_nixpkgs_commit nixos-23.11
+# gazelle:nix_cache_name repro_cache
+# gazelle:nix_nixpkgs_label @nixpkgs//:flake.nix
+
+gazelle(
+    name = "gazelle",
+    gazelle = ":gazelle_bin",
+    data = ["@nixpkgs//:flake.nix"],
+)

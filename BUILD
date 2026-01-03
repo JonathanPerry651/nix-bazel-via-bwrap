@@ -23,27 +23,33 @@ sh_binary(
     srcs = ["bwrap_sandbox.sh"],
 )
 
-
-
 filegroup(
     name = "distribution",
-    srcs = glob([
-        "*.bzl",
-        "*.bazel",
-        "BUILD",
-        "*.mod",
-        "*.sum",
-        "*.lock",
-        "bwrap_sandbox.sh",
-        "nix-portable",
-    ], exclude = ["bazel-*", ".*", "tests/**"]) + [
+    srcs = glob(
+        [
+            "*.bzl",
+            "*.bazel",
+            "BUILD",
+            "*.mod",
+            "*.sum",
+            "*.lock",
+            "bwrap_sandbox.sh",
+            "nix-portable",
+        ],
+        exclude = [
+            "bazel-*",
+            ".*",
+            "tests/**",
+        ],
+    ) + [
         "//cache:all_files",
-        "//gazelle_nix/language/nix:all_files",
         "//cmd/nix_tool:all_files",
-        "//sandbox:all_files",
+        "//gazelle_nix/language/nix:all_files",
         "//generator:all_files",
+        "//nix_deps:all_files",
+        "//nix_deps/nix_sources:all_files",
         "//nixpkgs:all_files",
-        "//nix_sources:all_files",
+        "//sandbox:all_files",
     ],
     visibility = ["//visibility:public"],
 )

@@ -70,6 +70,12 @@ def _nix_cache_repo_impl(ctx):
             # Add unpack target
             root_build.append('nix_nar_unpack(name = "%s", src = "%s")' % (target_name, nar_filename))
 
+    # Symlink nix_sources if present (for reproducible source references)
+    lock_path = ctx.path(ctx.attr.lockfile)
+    nix_sources_path = lock_path.dirname.get_child("nix_sources")
+    if nix_sources_path.exists:
+        ctx.symlink(nix_sources_path, "nix_sources")
+
     ctx.file("BUILD.bazel", "\n".join(root_build))
 
     # 2. Process Flakes (Packages)

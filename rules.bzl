@@ -68,8 +68,7 @@ def _nix_derivation_impl(ctx):
 
                     store_paths[f] = matched_p
                 else:
-
-
+                    pass
     full_closure = depset(
         direct = all_outputs + ctx.files.srcs,
         transitive = closure_parts
@@ -224,3 +223,12 @@ nix_binary = rule(
     },
     executable = True,
 )
+
+def nix_package(name, flake = None, deps = [], **kwargs):
+    """
+    Placeholder for nix_package rule.
+    Currently Gazelle generates this for non-binary packages, 
+    but the implementation is missing.
+    We alias to filegroup to satisfy loading requirements.
+    """
+    native.filegroup(name = name, **kwargs)

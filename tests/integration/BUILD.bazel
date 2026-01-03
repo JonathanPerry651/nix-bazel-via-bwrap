@@ -1,26 +1,55 @@
-sh_test(
-    name = "test_e2e",
-    srcs = ["test_e2e.sh"],
-    data = [
-        "//:distribution",
-    ],
-    tags = ["local", "requires-network"],
-    timeout = "long",
+load("@rules_bazel_integration_test//bazel_integration_test:defs.bzl", "bazel_integration_test", "integration_test_utils")
+
+package(default_visibility = ["//visibility:public"])
+
+# Explicitly export the workspace files so they can be consumed
+filegroup(
+    name = "e2e_workspace_files",
+    srcs = glob(["e2e_workspace/**"]),
 )
 
-sh_test(
-    name = "test_cache_miss",
-    srcs = ["test_cache_miss.sh"],
-    data = [
-        "//:distribution",
-        "//tests/manual/cache_miss:flake.nix",
-    ],
-    tags = ["local", "requires-network"],
+filegroup(
+    name = "cache_miss_workspace_files", 
+    srcs = glob(["cache_miss_workspace/**"]),
+)
+
+bazel_integration_test(
+    name = "test_e2e",
     timeout = "long",
+    test_runner = "test_e2e.sh",
+    workspace_path = "e2e_workspace", 
+    workspace_files = integration_test_utils.glob_workspace_files("e2e_workspace") + [
+        "//:distribution",
+        "//nix_deps:all_files", 
+    ],
+    tags = [
+        "local",
+        "requires-network",
+    ],
+    bazel_version = "7.4.1",
+)
+
+bazel_integration_test(
+    name = "test_cache_miss",
+    timeout = "long",
+    test_runner = "test_cache_miss.sh",
+    workspace_path = "cache_miss_workspace",
+    workspace_files = integration_test_utils.glob_workspace_files("cache_miss_workspace") + [
+         "//:distribution",
+         "//tests/manual/cache_miss:flake.nix",
+    ],
+    tags = [
+        "local",
+        "requires-network",
+    ],
+    bazel_version = "7.4.1",
 )
 
 sh_test(
     name = "probe_nix",
     srcs = ["probe_nix.sh"],
-    tags = ["local", "requires-network"],
+    tags = [
+        "local",
+        "requires-network",
+    ],
 )
