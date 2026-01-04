@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "nix_builder_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/JonathanPerry651/nix-bazel-via-bwrap/cmd/nix_builder",
+    visibility = ["//visibility:private"],
+    deps = ["//pkg/sandbox"],
+)
+
+go_binary(
+    name = "nix_builder",
+    embed = [":nix_builder_lib"],
+    visibility = ["//visibility:public"],
+)

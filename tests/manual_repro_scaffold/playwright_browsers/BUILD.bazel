@@ -1,0 +1,29 @@
+# gazelle:ignore
+load("@nix_bazel_via_bwrap//:rules.bzl", "nix_derivation", "nix_binary")
+
+# 1. Nix Derivation (Tests nix_builder)
+nix_derivation(
+    name = "hello_deriv",
+    builder_path = "/bin/sh",
+    args = ["-c", "mkdir -p $out/bin && echo 'Hello from Nix Builder' > $out/bin/hello && chmod +x $out/bin/hello"],
+    store_names = {"out": "hello-output"},
+    env = {"PATH": "/bin:/usr/bin"},
+)
+
+# 2. Nix Binary (Tests nix_runner)
+nix_binary(
+    name = "hello_runner",
+    exe_path = "/bin/sh", 
+    mounts = {":hello_deriv": "/nix/store/hello-output"},
+)
+
+# 3. Test verification
+sh_test(
+    name = "browser_test",
+    srcs = ["test_browsers.sh"],
+    data = [":hello_runner"],
+    env = {
+        "HELLO_RUNNER": "$(location :hello_runner)",
+    },
+    args = ["$(location :hello_runner)"],
+)

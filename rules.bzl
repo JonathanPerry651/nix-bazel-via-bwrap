@@ -109,6 +109,21 @@ def _nix_derivation_impl(ctx):
         }
     )
     
+    # Generate mounts manifest for runfiles auto-discovery
+    manifest_content = "{\n"
+    sorted_paths = sorted(store_paths.items(), key=lambda x: x[0].short_path)
+    for i, (f, p) in enumerate(sorted_paths):
+        # We use short_path as the key (relative to runfiles root)
+        # JSON formatting: key quoted, value quoted
+        manifest_content += '  "%s": "%s"' % (f.short_path, p)
+        if i < len(sorted_paths) - 1:
+            manifest_content += ",\n"
+    manifest_content += "\n}"
+    
+    manifest_file = ctx.actions.declare_file(ctx.label.name + ".nix-mounts.json")
+    ctx.actions.write(manifest_file, manifest_content)
+    all_outputs.append(manifest_file)
+
     return [
         DefaultInfo(files = depset(all_outputs)),
         NixInfo(outputs = fake_outputs, out_hash = "todo", closure = full_closure, store_paths = store_paths),
@@ -140,7 +155,7 @@ nix_derivation = rule(
             doc = "Map of labels or basenames to /nix/store paths",
         ),
         "_tool": attr.label(
-            default = "//sandbox:runner",
+            default = "//cmd/nix_builder",
             executable = True,
             cfg = "exec",
         ),
@@ -208,8 +223,9 @@ fi
 
 RUNNER="$RUNFILES/%s"
 
-exec "$RUNNER" "%s" "." %s -- "$@"
-""" % (ctx.executable._runner.short_path, ctx.attr.exe_path, " ".join(mount_flags))
+# nix_runner [flags] -- <exe> [args]
+exec "$RUNNER" %s -- "%s" "$@"
+""" % (ctx.executable._runner.short_path, " ".join(mount_flags), ctx.attr.exe_path)
 
     ctx.actions.write(out, content, is_executable = True)
     return [DefaultInfo(executable = out, runfiles = runfiles)]
@@ -219,7 +235,7 @@ nix_binary = rule(
     attrs = {
         "mounts": attr.label_keyed_string_dict(allow_files = True),
         "exe_path": attr.string(),
-        "_runner": attr.label(default = Label("//sandbox:runner"), executable = True, cfg = "target"),
+        "_runner": attr.label(default = Label("//cmd/nix_runner"), executable = True, cfg = "target"),
     },
     executable = True,
 )
@@ -232,3 +248,33 @@ def nix_package(name, flake = None, deps = [], **kwargs):
     We alias to filegroup to satisfy loading requirements.
     """
     native.filegroup(name = name, **kwargs)
+
+def _nix_toolchain_info_impl(ctx):
+    # Construct env: base env + resolved paths
+    # We expand $(location ...) templates using the target
+    env = {}
+    for k, v in ctx.attr.env.items():
+        env[k] = ctx.expand_location(v, targets = [ctx.attr.target])
+        
+    return [platform_common.ToolchainInfo(
+        nix_target = ctx.attr.target,
+        env = env,
+    )]
+
+nix_toolchain_info = rule(
+    implementation = _nix_toolchain_info_impl,
+    attrs = {
+        "target": attr.label(mandatory = True),
+        "env": attr.string_dict(),
+    },
+)
+
+def _nix_tool_test_impl(ctx):
+    # This is a generic test rule that consumes a hardcoded toolchain type (for now)
+    # or we can assume it's used with 'toolchains' attribute if passed to rule()
+    # BUT for this generic helper, we might need to rely on the user defining the rule.
+    # For now, let's implement a simple consumer that expects the provider to be available.
+    # Since we can't make 'toolchains' dynamic, this helper function 'nix_test_wrapper'
+    # returns the implementation function for a rule.
+    pass
+

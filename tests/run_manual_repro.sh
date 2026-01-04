@@ -48,4 +48,12 @@ fi
 echo "Building Hello..."
 bazel build $BAZEL_OPTS //hello:hello
 
+# Run Browser Toolchain Test
+echo "Running Browser Test..."
+if ! bazel test $BAZEL_OPTS //playwright_browsers:browser_test; then
+    echo "Test Failed! dumping log:"
+    cat bazel-testlogs/playwright_browsers/browser_test/test.log
+    exit 1
+fi
+
 echo "Success!"

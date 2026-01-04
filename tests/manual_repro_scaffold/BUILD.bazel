@@ -14,6 +14,6 @@ gazelle_binary(
 
 gazelle(
     name = "gazelle",
-    gazelle = ":gazelle_bin",
     data = ["@nixpkgs//:flake.nix"],
+    gazelle = ":gazelle_bin",
 )
