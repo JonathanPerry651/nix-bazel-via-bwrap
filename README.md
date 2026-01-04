@@ -46,7 +46,7 @@ gazelle_binary(
     name = "gazelle_bin",
     languages = [
         "@gazelle//language/go",
-        "@nix_bazel_via_bwrap//gazelle_nix/language/nix",
+        "@nix_bazel_via_bwrap//pkg/gazelle/language/nix",
     ],
 )
 ```

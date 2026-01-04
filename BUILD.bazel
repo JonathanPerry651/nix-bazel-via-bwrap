@@ -1,0 +1,35 @@
+load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+gazelle_binary(
+    name = "gazelle_bin",
+    languages = [
+        "@gazelle//language/go",
+        "//pkg/gazelle/language/nix",
+    ],
+)
+
+gazelle(
+    name = "gazelle",
+    gazelle = ":gazelle_bin",
+)
+
+filegroup(
+    name = "distribution",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "bazel-*/**",
+            ".git/**",
+        ],
+    ) + [
+        "//pkg/gazelle/language/nix:all_files",
+        "//pkg/sandbox:all_files",
+        "//cache:all_files",
+        "//cmd/nix_runner:all_files",
+        "//cmd/nix_tool:all_files",
+        "//cmd/nix_builder:all_files",
+        "//nix_deps:all_files",
+    ],
+)

@@ -1,0 +1,21 @@
+module(name = "test_hello", version = "0.0.0")
+
+bazel_dep(name = "nix_bazel_via_bwrap")
+local_path_override(
+    module_name = "nix_bazel_via_bwrap",
+    path = "/home/jonathanp/.cache/bazel/_bazel_jonathanp/4a994b850c1237a11c11f36522ba12bf/execroot/_main/bazel-out/k8-fastbuild/bin/tests/integration/test_hello.runfiles/_main",
+)
+
+bazel_dep(name = "rules_go", version = "0.59.0")
+bazel_dep(name = "gazelle", version = "0.45.0")
+bazel_dep(name = "rules_bazel_integration_test", version = "0.34.0")
+
+# Reuse the main repo's lock/cache to avoid massive downloads
+nix_lock = use_extension("@nix_bazel_via_bwrap//:extensions.bzl", "nix_lock_ext")
+nix_lock.from_file(
+    lockfile = "//nix_deps:nix.lock",
+    name = "hello_cache",
+    nixpkgs_name = "hello_nixpkgs",
+    nixpkgs_commit = "nixos-23.11",
+)
+use_repo(nix_lock, "hello_cache", "hello_nixpkgs", "hello_cache_gazelle_plugin")

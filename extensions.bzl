@@ -1,28 +1,4 @@
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file", "http_archive")
-load("//nixpkgs:nix_deps.bzl", "NIX_DEPS")
-
-def _nix_deps_impl(ctx):
-    for name, attrs in NIX_DEPS.items():
-        # Clean attrs: remove unknown attributes if needed, or pass selected ones
-        # http_file supports: urls, sha256, integrity, netrc, downloaded_file_path, executable
-        
-        args = {
-            "name": name,
-            "urls": attrs.get("urls"),
-            "sha256": attrs.get("sha256"),
-            "integrity": attrs.get("integrity"),
-            "downloaded_file_path": attrs.get("downloaded_file_path"),
-            "executable": attrs.get("executable", False),
-        }
-        
-        # Filter None values
-        clean_args = {k: v for k, v in args.items() if v != None}
-        
-        http_file(**clean_args)
-
-nix_deps_ext = module_extension(
-    implementation = _nix_deps_impl,
-)
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 def _nix_cache_repo_impl(ctx):
     content = ctx.read(ctx.path(ctx.attr.lockfile))
@@ -45,13 +21,16 @@ def _nix_cache_repo_impl(ctx):
     path_to_label = {}
     
     if "store_paths" in lock_content:
+        # Pass 1: Map all paths to labels
         for path, info in lock_content["store_paths"].items():
-            # Extract hash from path for target name
-            # /nix/store/HASH-NAME
             basename = path.split("/")[-1]
             hash_part = basename.split("-")[0]
             target_name = "s_" + hash_part
             path_to_label[path] = "//:" + target_name
+
+        # Pass 2: Generate targets
+        for path, info in lock_content["store_paths"].items():
+            target_name = path_to_label[path].replace("//:", "") # Retrieve name
             
             # Download NAR
             nar_filename = "blobs/" + info["nar_hash"].replace(":", "_") + ".nar.xz"
@@ -61,14 +40,27 @@ def _nix_cache_repo_impl(ctx):
                 "output": nar_filename,
                 "sha256": info["nar_hash"].replace("sha256:", ""),
             }
-            # integrity field might be missing in StorePaths too if not added
             if info.get("integrity"):
                 download_args["integrity"] = info["integrity"]
                 
             ctx.download(**download_args)
             
-            # Add unpack target
-            root_build.append('nix_nar_unpack(name = "%s", src = "%s")' % (target_name, nar_filename))
+            # Resolve references for deps
+            deps_labels = []
+            for ref in info.get("references", []):
+                if not ref.startswith("/"):
+                     ref_path = "/nix/store/" + ref
+                else:
+                     ref_path = ref
+                
+                # Exclude self-references to avoid cycles
+                if ref_path == path:
+                    continue
+
+                if ref_path in path_to_label:
+                     deps_labels.append(path_to_label[ref_path])
+            
+            root_build.append('nix_nar_unpack(name = "%s", src = "%s", store_path = "%s", deps = %s)' % (target_name, nar_filename, path, deps_labels))
 
     # Symlink nix_sources if present (for reproducible source references)
     lock_path = ctx.path(ctx.attr.lockfile)
@@ -76,38 +68,35 @@ def _nix_cache_repo_impl(ctx):
     if nix_sources_path.exists:
         ctx.symlink(nix_sources_path, "nix_sources")
 
-    ctx.file("BUILD.bazel", "\n".join(root_build))
+    build_files = {} # path -> list of lines
+    build_files["BUILD.bazel"] = root_build
 
     # 2. Process Flakes (Packages)
     for label, flake in lock_content["flakes"].items():
         if not label.startswith("//"):
             continue
         
-        # "tests/manual/hello"
-        pkg_path = label[2:].split(":")[0] 
+        # Parse package path from label
+        # //foo/bar:target -> foo/bar
+        # //:target -> ""
+        if ":" in label:
+             pkg_part = label[2:].split(":")[0]
+        else:
+             pkg_part = label[2:] # unlikely for flake label convention
+
+        build_file_path = "BUILD.bazel"
+        if pkg_part:
+             build_file_path = pkg_part + "/BUILD.bazel"
         
-        build_content = ['load("@nix_bazel_via_bwrap//:rules.bzl", "nix_binary")']
-        build_content.append('package(default_visibility = ["//visibility:public"])')
-        
-        # Determine closure labels
-        closure_labels = []
-        if flake.get("runtime_closure"):
-            for p in flake["runtime_closure"]:
-                if p in path_to_label:
-                    closure_labels.append(path_to_label[p])
+        if build_file_path not in build_files:
+             build_files[build_file_path] = [
+                 'load("@nix_bazel_via_bwrap//:rules.bzl", "nix_binary")',
+                 'package(default_visibility = ["//visibility:public"])'
+             ]
+
+        build_content = build_files[build_file_path]
         
         # Determine strict output path for main executable
-        # If Executable is bin/hello, and OutputStorePath is /nix/store/HASH-hello...
-        # We need to know WHICH store path is the output.
-        # flake["output_store_path"] -> Label
-        output_label = ""
-        if flake.get("output_store_path") and flake["output_store_path"] in path_to_label:
-            output_label = path_to_label[flake["output_store_path"]]
-        else:
-             # Fallback or error?
-             # For now, if missing component, we skip
-             pass
-        
         if flake.get("executable"):
             # Target name: "bin/hello"
             
@@ -118,22 +107,72 @@ def _nix_cache_repo_impl(ctx):
                     if p in path_to_label:
                         mounts_entries.append('        "%s": "%s",' % (path_to_label[p], p))
             
-            exe_full_path = flake["output_store_path"] + "/" + flake["executable"]
+            # Output store path logic
+            # Use 'output_store_path' if available, otherwise guess? 
+            # Lockfile generator should populate 'output_store_path'
+            if flake.get("output_store_path"):
+                 exe_full_path = flake["output_store_path"] + "/" + flake["executable"]
             
-            build_content.append('nix_binary(')
-            build_content.append('    name = "%s",' % flake["executable"])
-            build_content.append('    exe_path = "%s",' % exe_full_path)
-            build_content.append('    mounts = {')
-            build_content.extend(mounts_entries)
-            build_content.append('    },')
-            build_content.append(')')
-        
-        ctx.file(pkg_path + "/BUILD.bazel", "\n".join(build_content))
+                 build_content.append('nix_binary(')
+                 build_content.append('    name = "%s",' % flake["executable"])
+                 build_content.append('    exe_path = "%s",' % exe_full_path)
+                 build_content.append('    mounts = {')
+                 build_content.extend(mounts_entries)
+                 build_content.append('    },')
+                 build_content.append(')')
+    
+    # Write all build files
+    for path, lines in build_files.items():
+         ctx.file(path, "\n".join(lines))
 
+# Repositories generated by this extension
 nix_cache_repo = repository_rule(
     implementation = _nix_cache_repo_impl,
     attrs = {
         "lockfile": attr.label(allow_single_file = True),
+    },
+)
+
+def _nix_plugin_repo_impl(ctx):
+    nixpkgs = ctx.attr.nixpkgs
+    pkg_name = ctx.attr.go_package_name
+    
+    # Generate plugin.go wrapper
+    ctx.file("plugin.go", """
+package nix
+
+import (
+    "github.com/JonathanPerry651/nix-bazel-via-bwrap/pkg/gazelle/language/nix"
+    "github.com/bazelbuild/bazel-gazelle/language"
+)
+
+func NewLanguage() language.Language {
+    return nix.NewLanguage("%s")
+}
+""" % str(nixpkgs))
+
+    # Generate BUILD.bazel
+    ctx.file("BUILD.bazel", """
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "nix",
+    srcs = ["plugin.go"],
+    importpath = "github.com/JonathanPerry651/nix-bazel-via-bwrap/plugin_generated/%s",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@nix_bazel_via_bwrap//pkg/gazelle/language/nix",
+        "@gazelle//language",
+    ],
+    data = ["%s"],
+)
+""" % (pkg_name, str(nixpkgs)))
+
+nix_plugin_repo = repository_rule(
+    implementation = _nix_plugin_repo_impl,
+    attrs = {
+        "nixpkgs": attr.string(mandatory = True),
+        "go_package_name": attr.string(mandatory = True),
     },
 )
 
@@ -143,17 +182,40 @@ def _nix_lock_impl(ctx):
             nix_cache_repo(name = tag.name, lockfile = tag.lockfile)
 
             # Check for nixpkgs_commit and generate repo
+            commit = tag.nixpkgs_commit
             content = ctx.read(tag.lockfile)
             if content.strip():
                 lock = json.decode(content)
-                if lock.get("nixpkgs_commit"):
-                    commit = lock["nixpkgs_commit"]
-                    http_archive(
-                        name = tag.nixpkgs_name,
-                        urls = ["https://github.com/NixOS/nixpkgs/archive/%s.tar.gz" % commit],
-                        strip_prefix = "nixpkgs-" + commit,
-                        build_file_content = 'filegroup(name = "all_files", srcs = glob(["**"]), visibility = ["//visibility:public"])',
-                    )
+                lock_commit = lock.get("nixpkgs_commit")
+                # Fail if lockfile has a commit but it differs from the tag
+                if lock_commit and lock_commit != commit:
+                     fail("nixpkgs_commit mismatch: MODULE.bazel specifies '%s' but lockfile '%s' has '%s'. Please re-run Gazelle to update the lockfile." % (commit, tag.lockfile, lock_commit))
+
+            if commit:
+                http_archive(
+                    name = tag.nixpkgs_name,
+                    urls = ["https://github.com/NixOS/nixpkgs/archive/%s.tar.gz" % commit],
+                    strip_prefix = "nixpkgs-" + commit,
+                    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+exports_files(glob(["**"]))
+""",
+                )
+            
+            # Always generate gazelle plugin
+            plugin_name = tag.gazelle_plugin_name
+            if not plugin_name:
+                plugin_name = tag.name + "_gazelle_plugin"
+            
+            nix_plugin_repo(
+                name = plugin_name,
+                nixpkgs = "@%s//:flake.nix" % tag.nixpkgs_name,
+                go_package_name = plugin_name,
+            )
 
 nix_lock_ext = module_extension(
     implementation = _nix_lock_impl,
@@ -162,6 +224,8 @@ nix_lock_ext = module_extension(
             "lockfile": attr.label(),
             "name": attr.string(default = "nix_cache"),
             "nixpkgs_name": attr.string(default = "nixpkgs"),
+            "nixpkgs_commit": attr.string(mandatory = True),
+            "gazelle_plugin_name": attr.string(),
         }),
     },
 )

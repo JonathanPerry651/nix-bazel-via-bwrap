@@ -7,7 +7,7 @@ gazelle_binary(
     name = "gazelle_binary",
     languages = [
         "@gazelle//language/go",
-        "//gazelle_nix/language/nix",
+        "//pkg/gazelle/language/nix",
     ],
 )
 
@@ -44,12 +44,11 @@ filegroup(
     ) + [
         "//cache:all_files",
         "//cmd/nix_tool:all_files",
-        "//gazelle_nix/language/nix:all_files",
-        "//generator:all_files",
         "//nix_deps:all_files",
         "//nix_deps/nix_sources:all_files",
-        "//nixpkgs:all_files",
-        "//sandbox:all_files",
+        "//pkg/gazelle/language/nix:all_files",
+        "//pkg/sandbox:all_files",
+        "//tests/integration:all_files",
     ],
     visibility = ["//visibility:public"],
 )

@@ -13,3 +13,9 @@ go_binary(
     embed = [":nix_builder_lib"],
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)

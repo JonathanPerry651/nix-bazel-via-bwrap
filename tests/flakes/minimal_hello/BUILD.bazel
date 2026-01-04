@@ -1,0 +1,15 @@
+load("@nix_bazel_via_bwrap//:rules.bzl", "nix_flake_run_under", "nix_package")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["flake.nix"])
+
+nix_package(
+    name = "default",
+    flake = "flake.nix",
+)
+
+nix_flake_run_under(
+    name = "run_under",
+    src = ":default",
+)

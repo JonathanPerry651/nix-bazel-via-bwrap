@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,52 +15,51 @@ type SandboxConfig struct {
 	Envs    map[string]string
 	WorkDir string // Inside sandbox
 
-	// Setup standard paths (/bin, /usr, /proc, /dev, /tmp)
-	StandardSetup bool
+	// UseNamespaces enables --unshare-all, --proc /proc, --dev /dev, --tmpfs /tmp
+	UseNamespaces bool
 
-	// Explicit list of host paths to mount if StandardSetup is true
-	// (e.g. /home/.cache/bazel)
+	// Explicit list of host paths to mount (e.g. .cache)
 	AdditionalRoBinds []string
 }
 
+// StandardSetup adds standard mounts and enables namespaces.
+// If mountSystemLibs is true, it mounts host system libraries and tools.
+func (c *SandboxConfig) StandardSetup(mountSystemLibs bool) error {
+	c.UseNamespaces = true
+
+	// Initialize maps if needed
+	if c.Mounts == nil {
+		c.Mounts = make(map[string]string)
+	}
+
+	// Mount standard system library paths if requested
+	if mountSystemLibs {
+		libs := []string{
+			"/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/local/lib",
+			"/bin", "/usr/bin", "/sbin", "/usr/sbin",
+		}
+		for _, lib := range libs {
+			if _, err := os.Stat(lib); err == nil {
+				c.Mounts[lib] = lib
+			}
+		}
+	}
+	return nil
+}
+
 // BuildBwrapArgs constructs the bwrap command line arguments
-func BuildBwrapArgs(cfg SandboxConfig) ([]string, error) {
+func BuildBwrapArgs(cfg *SandboxConfig) ([]string, error) {
 	var args []string
 
-	if cfg.StandardSetup {
+	if cfg.UseNamespaces {
 		args = append(args,
 			"--unshare-all",
 			"--proc", "/proc",
 			"--dev", "/dev",
 			"--tmpfs", "/tmp",
-			// We rely on createSysDirs (below) to create /bin and /usr/bin correctly
-			// either as directories or symlinks.
+			// Ensure /usr exists if we mount stuff under it?
 			"--dir", "/usr",
 		)
-
-		// Mount system libraries and tools for host tool compatibility
-		// Use symlinks if possible to preserve host structure
-		sysDirs := []string{
-			"/lib", "/lib64", "/usr/lib", "/usr/lib64",
-			"/bin", "/usr/bin", "/sbin", "/usr/sbin",
-		}
-		for _, d := range sysDirs {
-			info, err := os.Lstat(d)
-			if err != nil {
-				continue
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				// Replicate symlink
-				if target, err := os.Readlink(d); err == nil {
-					// bwrap --symlink <target> <dest>
-					args = append(args, "--symlink", target, d)
-				}
-			} else {
-				// Directory (or file) -> Bind
-				// For safety, only bind if it exists
-				args = append(args, "--ro-bind", d, d)
-			}
-		}
 	}
 
 	// WorkDir
@@ -130,21 +130,43 @@ func FindShell(mounts map[string]string, builderPath string) bool {
 	return false
 }
 
-// EnsureShell ensures /bin/sh is mounted in the sandbox, using host shell if necessary
-func EnsureShell(mounts map[string]string, builder string) {
-	if FindShell(mounts, builder) {
-		return
-	}
-
-	// Fallback: Mount host /bin/sh
-	if realSh, err := filepath.EvalSymlinks("/bin/sh"); err == nil {
-		mounts["/bin/sh"] = realSh
-	} else if _, err := os.Stat("/bin/sh"); err == nil {
-		mounts["/bin/sh"] = "/bin/sh"
-	} else {
-		// Last resort: /bin/bash?
-		if realBash, err := filepath.EvalSymlinks("/bin/bash"); err == nil {
-			mounts["/bin/sh"] = realBash
+// EnsureShell ensures that a shell is available in the sandbox.
+// If mountSystemLibs is true, it attempts to find and mount /bin/sh from host if missing.
+func (c *SandboxConfig) EnsureShell(mountSystemLibs bool) error {
+	// Check if common shells are already mounted
+	shells := []string{"/bin/sh", "/bin/bash", "/usr/bin/env", "/usr/bin/bash"}
+	for _, sh := range shells {
+		if _, ok := c.Mounts[sh]; ok {
+			return nil
+		}
+		// Check if parent directory is mounted (e.g. /bin)
+		if _, ok := c.Mounts[filepath.Dir(sh)]; ok {
+			return nil
 		}
 	}
+
+	if !mountSystemLibs {
+		// Strict mode: user must provide shell via mounts.
+		// We return nil and let execution fail if shell is missing.
+		return nil
+	}
+
+	// If allowed to mount system libs, try to resolve /bin/sh on host
+	if realSh, err := filepath.EvalSymlinks("/bin/sh"); err == nil {
+		c.Mounts["/bin/sh"] = realSh
+		return nil
+	}
+	// Try without symlink resolution
+	if _, err := os.Stat("/bin/sh"); err == nil {
+		c.Mounts["/bin/sh"] = "/bin/sh"
+		return nil
+	}
+
+	// Try /bin/bash
+	if realBash, err := filepath.EvalSymlinks("/bin/bash"); err == nil {
+		c.Mounts["/bin/sh"] = realBash
+		return nil
+	}
+
+	return fmt.Errorf("no shell found in mounts or on host")
 }

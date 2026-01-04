@@ -99,8 +99,9 @@ func main() {
 	}
 	// Auto-discover
 	if paths, err := sandbox.CollectNixPathsFromRunfiles(os.Args[0]); err == nil {
-		for _, p := range paths {
-			mounts[p] = p
+		for k, v := range paths {
+			// k=host, v=sandbox. mounts[sandbox] = host
+			mounts[v] = k
 		}
 	}
 
@@ -142,19 +143,14 @@ func main() {
 				"TMPDIR":        "/build",
 				"HOME":          "/homeless-shelter",
 			},
-			WorkDir:       "/build",
-			StandardSetup: true,
-			AdditionalRoBinds: func() []string {
-				home, err := os.UserHomeDir()
-				if err != nil {
-					return nil
-				}
-				cache := filepath.Join(home, ".cache", "bazel")
-				if _, err := os.Stat(cache); err == nil {
-					return []string{cache}
-				}
-				return nil
-			}(),
+			WorkDir: "/build",
+		}
+
+		// Always mount system libs for builder to ensure generic builders work (e.g. /bin/sh)
+		// Builders are assumed to be non-hermetic until we enforce pure builders strictly.
+		// For now matching previous behavior of mounting /bin etc.
+		if err := cfg.StandardSetup(true); err != nil {
+			log.Fatalf("StandardSetup failed: %v", err)
 		}
 
 		// Inject Output Paths as Environment Variables
@@ -167,9 +163,15 @@ func main() {
 		cfg.Mounts["/etc/hosts"] = filepath.Join(etcDir, "hosts")
 		cfg.Mounts["/homeless-shelter"] = homelessDir
 
-		sandbox.EnsureShell(cfg.Mounts, builder)
+		// EnsureShell is now a method of SandboxConfig
+		// Note: StandardSetup(true) already mounts /bin etc, so this might not need to do much
+		// but we call it to ensure `builder` path is available or warn.
+		// However, the new API is cfg.EnsureShell(mountSystemLibs bool)
+		if err := cfg.EnsureShell(true); err != nil {
+			log.Printf("Warning: EnsureShell failed: %v", err)
+		}
 
-		bwrapArgs, err := sandbox.BuildBwrapArgs(cfg)
+		bwrapArgs, err := sandbox.BuildBwrapArgs(&cfg)
 		if err != nil {
 			log.Fatalf("Failed to build bwrap args: %v", err)
 		}

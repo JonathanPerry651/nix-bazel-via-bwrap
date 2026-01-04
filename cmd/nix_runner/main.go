@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"os/exec"
@@ -11,59 +12,146 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatalf("Usage: %s [flags...] -- <command> [args...]", os.Args[0])
-	}
 
-	var explicitMounts []string
-	var workDir string
-	var command []string
+	// 0. Check for adjacent config file (Symlink mode)
+	exePath := os.Args[0]
+	configPath := exePath + ".nix-runner.json"
 
-	args := os.Args[1:]
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--mount" && i+1 < len(args) {
-			explicitMounts = append(explicitMounts, args[i+1])
-			i++
-		} else if arg == "--cwd" && i+1 < len(args) {
-			workDir = args[i+1]
-			i++
-		} else if arg == "--" {
-			command = args[i+1:]
-			break
-		} else {
-			if !strings.HasPrefix(arg, "-") {
-				command = args[i:]
+	var (
+		cwd            string
+		autoEnv        bool
+		impureHostLibs bool
+		cmdToRun       string
+		cmdArgs        []string
+	)
+	mounts := make(map[string]string)
+	extraEnvs := make(map[string]string)
+
+	if _, err := os.Stat(configPath); err == nil {
+		// Load from config file
+		type RunnerConfig struct {
+			Mounts  map[string]string `json:"mounts"`
+			Env     map[string]string `json:"env"`
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			WorkDir string            `json:"work_dir"`
+			Impure  bool              `json:"impure"`
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			log.Fatalf("Failed to read config %s: %v", configPath, err)
+		}
+		var cfg RunnerConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			log.Fatalf("Failed to parse config %s: %v", configPath, err)
+		}
+
+		cwd = cfg.WorkDir
+		impureHostLibs = cfg.Impure
+		cmdToRun = cfg.Command
+		cmdArgs = cfg.Args
+
+		// Resolve relative mounts against runfiles dir
+		runfilesDirEnv := os.Getenv("RUNFILES_DIR")
+		if runfilesDirEnv == "" {
+			runfilesDirEnv = exePath + ".runfiles"
+		}
+
+		for k, v := range cfg.Mounts {
+			if !filepath.IsAbs(k) && runfilesDirEnv != "" {
+				// Handle Bazel external repo logic ../repo/path -> repo/path
+				if strings.HasPrefix(k, "../") {
+					k = k[3:]
+				} else if strings.HasPrefix(k, "external/") {
+					k = k[9:]
+				} else {
+					// Assume main repo?
+					// For Bzlmod, main artifacts are usually under <module_name>/
+					// We might need to handle this later
+					k = "_main/" + k
+				}
+				k = filepath.Join(runfilesDirEnv, k)
+			}
+			log.Printf("DEBUG: Resolved mount %s -> %s", k, v)
+			mounts[v] = k
+		}
+		for k, v := range cfg.Env {
+			extraEnvs[k] = v
+		}
+
+		// Append CLI args
+		if len(os.Args) > 1 {
+			cmdArgs = append(cmdArgs, os.Args[1:]...)
+		}
+
+	} else {
+		if len(os.Args) < 2 {
+			log.Fatalf("Usage: %s [flags...] -- <command> [args...]", os.Args[0])
+		}
+		// Legacy Flag Parsing
+		args := os.Args[1:]
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			if arg == "--" {
+				if i+1 < len(args) {
+					cmdToRun = args[i+1]
+					cmdArgs = args[i+2:]
+				}
 				break
+			}
+
+			var val string
+			if strings.HasPrefix(arg, "--mount=") {
+				val = strings.TrimPrefix(arg, "--mount=")
+			} else if arg == "--mount" && i+1 < len(args) {
+				val = args[i+1]
+				i++
+			}
+
+			if val != "" {
+				parts := strings.SplitN(val, ":", 2)
+				if len(parts) != 2 {
+					log.Printf("WARNING: Invalid mount format '%s', skipping.", val)
+				} else {
+					mounts[parts[1]] = parts[0]
+					log.Printf("DEBUG: Explicit mount: %s -> %s", parts[0], parts[1])
+				}
+				continue
+			}
+
+			if strings.HasPrefix(arg, "--cwd=") {
+				cwd = strings.TrimPrefix(arg, "--cwd=")
+				continue
+			}
+			if arg == "--auto-env" {
+				autoEnv = true
+				continue
+			}
+			if arg == "--impure-host-libs" {
+				impureHostLibs = true
+				continue
 			}
 		}
 	}
 
-	if len(command) == 0 {
-		log.Fatal("No command specified")
-	}
-
-	mounts := make(map[string]string)
-
-	// 1. Process explicit mounts
-	for _, m := range explicitMounts {
-		parts := strings.SplitN(m, ":", 2)
-		if len(parts) != 2 {
-			log.Printf("WARNING: Invalid mount format '%s', skipping.", m)
-			continue
+	// 2. Auto-discovery (Conditional)
+	if autoEnv {
+		log.Printf("DEBUG: Starting auto-discovery (enabled)...")
+		autoPaths, err := sandbox.CollectNixPathsFromRunfiles(os.Args[0])
+		if err != nil {
+			log.Printf("WARNING: Runfiles discovery failed: %v", err)
+		} else {
+			log.Printf("DEBUG: Found %d mount paths", len(autoPaths))
+			for k, v := range autoPaths {
+				// k is runfiles/host path, v is sandbox path (/nix/store/...)
+				// Prioritize explicit mounts: Only add if not present
+				if _, exists := mounts[v]; !exists {
+					mounts[v] = k
+				}
+			}
 		}
-		mounts[parts[1]] = parts[0]
-	}
-
-	// 2. Auto-discovery
-	autoPaths, err := sandbox.CollectNixPathsFromRunfiles(os.Args[0])
-	if err != nil {
-		log.Printf("WARNING: Runfiles discovery failed: %v", err)
-	}
-	for _, p := range autoPaths {
-		if _, exists := mounts[p]; !exists {
-			mounts[p] = p
-		}
+	} else {
+		log.Printf("DEBUG: Auto-discovery disabled")
 	}
 
 	// 3. Mount Runfiles Root & PWD
@@ -76,47 +164,55 @@ func main() {
 		mounts[pwd] = pwd
 	}
 
-	// 4. Configure Sandbox
-	finalMounts := make(map[string]string)
-	for s, h := range mounts {
-		absHost, err := filepath.EvalSymlinks(h)
-		if err != nil {
-			absHost, _ = filepath.Abs(h)
-		}
-		finalMounts[s] = absHost
+	// 4. Sandbox Configuration
+	if cwd == "" && pwd != "" {
+		cwd = pwd
+	}
+	cfg := &sandbox.SandboxConfig{
+		Mounts:  mounts,
+		Envs:    make(map[string]string),
+		WorkDir: cwd,
 	}
 
-	// Detect specific host paths that might be needed (e.g. Bazel cache)
-	// This replaces the hardcoded list with a dynamic check
-	var additionalBinds []string
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		cachePath := filepath.Join(homeDir, ".cache", "bazel")
-		if _, err := os.Stat(cachePath); err == nil {
-			additionalBinds = append(additionalBinds, cachePath)
-		}
+	if err := cfg.StandardSetup(impureHostLibs); err != nil {
+		log.Fatalf("Failed to setup standard sandbox: %v", err)
 	}
 
-	cfg := sandbox.SandboxConfig{
-		Mounts:            finalMounts,
-		Envs:              make(map[string]string),
-		WorkDir:           workDir,
-		StandardSetup:     true,
-		AdditionalRoBinds: additionalBinds,
+	// Ensure shell for generic commands (conditional)
+	if err := cfg.EnsureShell(impureHostLibs); err != nil {
+		log.Printf("WARNING: EnsureShell failed: %v", err)
 	}
 
-	for _, e := range os.Environ() {
-		kv := strings.SplitN(e, "=", 2)
-		if len(kv) == 2 {
-			cfg.Envs[kv[0]] = kv[1]
-		}
-	}
-	// Set Nix envs
+	// 5. Environment Variables
+	// Base envs
+	cfg.Envs["PATH"] = "/bin:/usr/bin"
+	cfg.Envs["HOME"] = "/homeless-shelter"
 	cfg.Envs["NIX_STORE"] = "/nix/store"
 
-	// Ensure /bin/sh is available (esp if command depends on it)
-	// For runner, the command[0] is the builder-equivalent
-	sandbox.EnsureShell(cfg.Mounts, command[0])
+	// Add config envs
+	for k, v := range extraEnvs {
+		cfg.Envs[k] = v
+	}
+
+	// Auto-discover Envs from runfiles (Conditional)
+	if autoEnv {
+		log.Printf("DEBUG: Starting env discovery (enabled)...")
+		autoEnvs, err := sandbox.CollectEnvFromRunfiles(os.Args[0])
+		if err != nil {
+			log.Printf("WARNING: Env discovery failed: %v", err)
+		} else {
+			log.Printf("DEBUG: Found %d env vars", len(autoEnvs))
+			for k, v := range autoEnvs {
+				// support $VAR expansion (e.g. PATH=$out/bin:$PATH)
+				expanded := os.Expand(v, func(key string) string {
+					return cfg.Envs[key]
+				})
+				cfg.Envs[k] = expanded
+			}
+		}
+	} else {
+		log.Printf("DEBUG: Env discovery disabled")
+	}
 
 	bwrapArgs, err := sandbox.BuildBwrapArgs(cfg)
 	if err != nil {
@@ -124,7 +220,8 @@ func main() {
 	}
 
 	bwrapArgs = append(bwrapArgs, "--")
-	bwrapArgs = append(bwrapArgs, command...)
+	bwrapArgs = append(bwrapArgs, cmdToRun)
+	bwrapArgs = append(bwrapArgs, cmdArgs...)
 
 	cmd := exec.Command("bwrap", bwrapArgs...)
 	cmd.Stdin = os.Stdin

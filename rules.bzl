@@ -1,5 +1,73 @@
 NixInfo = provider(
-    fields = ["outputs", "out_hash", "closure", "store_paths"],
+    fields = ["outputs", "out_hash", "closure", "store_paths", "env"],
+)
+
+# ... (skip to nix_package)
+
+def _nix_package_impl(ctx):
+    # Simulates a package/environment definition.
+    # It can bundle dependencies and export environment variables.
+    
+    # Collect transitive closures and store paths from deps
+    closure = []
+    store_paths = {}
+    
+    # Normally nix_package would involve an action to build the derivation?
+    # But here we assume it acts as a provider aggregator for Gazelle results.
+    # Or in the repro, it just wraps deps.
+    # The 'srcs' might be the output of the derivation built elsewhere?
+    # For now, let's treat it as a wrapper around deps that adds env info.
+    
+    all_files = []
+    
+    for dep in ctx.attr.deps:
+        if NixInfo in dep:
+             closure.append(dep[NixInfo].closure)
+             store_paths.update(dep[NixInfo].store_paths)
+        all_files.append(dep[DefaultInfo].files)
+
+    # Generate manifests for this package's environment
+    # Env manifest
+    env_content = "{\n"
+    sorted_envs = sorted(ctx.attr.env.items())
+    for i, (k, v) in enumerate(sorted_envs):
+        env_content += '  "%s": "%s"' % (k, v)
+        if i < len(sorted_envs) - 1:
+             env_content += ",\n"
+    env_content += "\n}"
+    
+    env_file = ctx.actions.declare_file(ctx.label.name + ".nix-env.json")
+    ctx.actions.write(env_file, env_content)
+    all_files.append(depset([env_file]))
+    
+    # Mounts manifest (if we had direct mounts, but here we aggregate deps)
+    # The runner walks runfiles. It will find deps' manifests.
+    # But if this package introduces new mounts (not just deps), we would need one.
+    # For now, we rely on deps' manifests.
+    
+    runfiles = ctx.runfiles(files = [env_file])
+    for dep in ctx.attr.deps:
+        runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
+
+    return [
+       DefaultInfo(files = depset(transitive=all_files), runfiles = runfiles),
+       NixInfo(
+           outputs = {}, 
+           out_hash = "",
+           closure = depset(transitive=closure),
+           store_paths = store_paths,
+           env = ctx.attr.env,
+       )
+    ]
+
+nix_package = rule(
+    implementation = _nix_package_impl,
+    attrs = {
+        "deps": attr.label_list(),
+        "srcs": attr.label_list(allow_files = True),
+        "env": attr.string_dict(doc = "Environment variables exposed by this package"),
+        "flake": attr.label(allow_single_file = True),
+    }
 )
 
 def _nix_derivation_impl(ctx):
@@ -123,41 +191,62 @@ def _nix_derivation_impl(ctx):
     manifest_file = ctx.actions.declare_file(ctx.label.name + ".nix-mounts.json")
     ctx.actions.write(manifest_file, manifest_content)
     all_outputs.append(manifest_file)
+    
+    # Generate env manifest
+    env_content = "{\n"
+    sorted_envs = sorted(ctx.attr.env.items())
+    for i, (k, v) in enumerate(sorted_envs):
+        env_content += '  "%s": "%s"' % (k, v)
+        if i < len(sorted_envs) - 1:
+            env_content += ",\n"
+    env_content += "\n}"
+    
+    env_file = ctx.actions.declare_file(ctx.label.name + ".nix-env.json")
+    ctx.actions.write(env_file, env_content)
+    all_outputs.append(env_file)
 
     return [
         DefaultInfo(files = depset(all_outputs)),
-        NixInfo(outputs = fake_outputs, out_hash = "todo", closure = full_closure, store_paths = store_paths),
+        NixInfo(outputs = fake_outputs, out_hash = "todo", closure = full_closure, store_paths = store_paths, env = {}),
     ]
 
 nix_derivation = rule(
     implementation = _nix_derivation_impl,
+    doc = "Defines a Nix derivation build using a custom builder or script.",
     attrs = {
         "builder": attr.label(
             executable = True,
             cfg = "exec",
-            mandatory = False, 
+            mandatory = False,
+            doc = "The builder executable label (e.g. //sandbox:builder).",
         ),
         "builder_path": attr.string(
-            doc = "Path to builder inside sandbox, if not using 'builder' label",
+            doc = "Absolute path to builder executable inside the sandbox (if not using 'builder' label).",
         ),
         "srcs": attr.label_list(
             allow_files = True,
+            doc = "Input files and dependencies for the build.",
         ),
-        "args": attr.string_list(),
-        "env": attr.string_dict(),
+        "args": attr.string_list(
+            doc = "Arguments passed to the builder.",
+        ),
+        "env": attr.string_dict(
+            doc = "Environment variables set during the build.",
+        ),
         "store_names": attr.string_dict(
-            doc = "Map of output names to their store directory names (basename of /nix/store path)",
+            doc = "Map of output names (e.g. 'out') to their store directory names (basename of /nix/store path).",
         ),
         "source_hashes": attr.string_dict(
-            doc = "Map of source filenames to expected 'hash:algo' for deferred verification",
+            doc = "Map of source filenames to expected 'hash:algo' for deferred verification (optional).",
         ),
         "source_mappings": attr.string_dict(
-            doc = "Map of labels or basenames to /nix/store paths",
+            doc = "Map of labels or basenames to /nix/store paths for input mapping.",
         ),
         "_tool": attr.label(
             default = "//cmd/nix_builder",
             executable = True,
             cfg = "exec",
+            doc = "Internal reference to the nix_builder tool.",
         ),
     },
 )
@@ -179,16 +268,46 @@ def _nix_nar_unpack_impl(ctx):
         progress_message = "Unpacking NAR %s" % ctx.file.src.short_path,
         use_default_shell_env = True,
     )
+
+    # Collect transitive closure and store paths
+    closure = []
+    store_paths = {}
     
-    return [DefaultInfo(files = depset([out]))]
+    # Collect transitive closure and store paths from deps
+
+    for dep in ctx.attr.deps:
+        if NixInfo in dep:
+             closure.append(dep[NixInfo].closure)
+             store_paths.update(dep[NixInfo].store_paths)
+    
+    # Store path for self
+    if ctx.attr.store_path:
+        store_paths[out] = ctx.attr.store_path
+
+    files_depset = depset([out], transitive = closure)
+    return [
+        DefaultInfo(
+            files = files_depset,
+            runfiles = ctx.runfiles(transitive_files = files_depset)
+        ),
+        NixInfo(
+            outputs = {},
+            out_hash = "",
+            closure = files_depset,
+            store_paths = store_paths,
+            env = {}
+        )
+    ]
 
 nix_nar_unpack = rule(
     implementation = _nix_nar_unpack_impl,
     attrs = {
         "src": attr.label(allow_single_file = True, mandatory = True),
+        "deps": attr.label_list(providers = [NixInfo]),
+        "store_path": attr.string(doc = "Absolute /nix/store path this output corresponds to"),
         "compression": attr.string(default = "xz", values = ["xz", "bzip2", "none"]),
         "_tool": attr.label(
-            default = Label("//cmd/nix_tool"),
+            default = Label("@nix_bazel_via_bwrap//cmd/nix_tool"),
             executable = True,
             cfg = "exec",
         ),
@@ -196,67 +315,132 @@ nix_nar_unpack = rule(
 )
 
 def _nix_binary_impl(ctx):
-    out = ctx.actions.declare_file(ctx.label.name + ".bash")
+    out = ctx.actions.declare_file(ctx.label.name)
+    config_out = ctx.actions.declare_file(ctx.label.name + ".nix-runner.json")
     
-    runfiles = ctx.runfiles(files = [ctx.executable._runner])
+    config_mounts = {}
+    
+    # Calculate mounts from targets
+    for target, mount_path in ctx.attr.mounts.items():
+        # Heuristic: pick the first file that is likely the output directory
+        # Avoiding .json metadata files
+        selected_file = None
+        for f in target[DefaultInfo].files.to_list():
+            if f.extension != "json":
+                selected_file = f
+                break
+        if not selected_file and len(target[DefaultInfo].files.to_list()) > 0:
+             selected_file = target[DefaultInfo].files.to_list()[0]
+        
+        if selected_file:
+            config_mounts[selected_file.short_path] = mount_path
+        else:
+            print("WARNING: No files found for mount target %s" % target.label)
+
+    config = {
+        "mounts": config_mounts,
+        "env": ctx.attr.env,
+        "command": ctx.attr.exe_path,
+        "args": ctx.attr.args,
+        "work_dir": "",
+        "impure": ctx.attr.impure,
+    }
+
+    ctx.actions.write(config_out, json.encode(config))
+
+    # Create symlink to runner
+    ctx.actions.symlink(
+        output = out,
+        target_file = ctx.executable._runner,
+        is_executable = True,
+    )
+
+    # Runfiles
+    runfiles = ctx.runfiles(files = [config_out, ctx.executable._runner])
     for target in ctx.attr.mounts:
         runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
+        # Also ensure the files themselves are in runfiles (transitive_files)
+        # default_runfiles usually includes them, but explicit add is safe
         runfiles = runfiles.merge(ctx.runfiles(transitive_files = target[DefaultInfo].files))
-        
-    mount_flags = []
-    for target, mount_path in ctx.attr.mounts.items():
-        f = target[DefaultInfo].files.to_list()[0]
-        # Use workspace_name for correct runfiles path if needed?
-        # f.short_path usually "repo_name/path" or "path" (if main)
-        # We rely on Runner finding it via simple path in runfiles
-        mount_flags.append("--mount")
-        mount_flags.append('"$RUNFILES/%s":%s' % (f.short_path, mount_path))
 
-    content = """#!/bin/bash
-RUNFILES=${RUNFILES_DIR:-$0.runfiles}
-if [ ! -d "$RUNFILES" ]; then
-    RUNFILES=${0}.runfiles
-fi
-if [ -d "$RUNFILES/_main" ]; then
-    RUNFILES="$RUNFILES/_main"
-fi
-
-RUNNER="$RUNFILES/%s"
-
-# nix_runner [flags] -- <exe> [args]
-exec "$RUNNER" %s -- "%s" "$@"
-""" % (ctx.executable._runner.short_path, " ".join(mount_flags), ctx.attr.exe_path)
-
-    ctx.actions.write(out, content, is_executable = True)
     return [DefaultInfo(executable = out, runfiles = runfiles)]
 
 nix_binary = rule(
     implementation = _nix_binary_impl,
     attrs = {
         "mounts": attr.label_keyed_string_dict(allow_files = True),
+        "env": attr.string_dict(),
         "exe_path": attr.string(),
+        "impure": attr.bool(default = False, doc = "If True, mounts host system libraries (/bin, /lib, etc)."),
         "_runner": attr.label(default = Label("//cmd/nix_runner"), executable = True, cfg = "target"),
     },
     executable = True,
 )
 
-def nix_package(name, flake = None, deps = [], **kwargs):
-    """
-    Placeholder for nix_package rule.
-    Currently Gazelle generates this for non-binary packages, 
-    but the implementation is missing.
-    We alias to filegroup to satisfy loading requirements.
-    """
-    native.filegroup(name = name, **kwargs)
 
 
 
-def _nix_tool_test_impl(ctx):
-    # This is a generic test rule that consumes a hardcoded toolchain type (for now)
-    # or we can assume it's used with 'toolchains' attribute if passed to rule()
-    # BUT for this generic helper, we might need to rely on the user defining the rule.
-    # For now, let's implement a simple consumer that expects the provider to be available.
-    # Since we can't make 'toolchains' dynamic, this helper function 'nix_test_wrapper'
-    # returns the implementation function for a rule.
-    pass
+
+
+def _nix_flake_run_under_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name)
+    config_out = ctx.actions.declare_file(ctx.label.name + ".nix-runner.json")
+    
+    # Provider-based configuration
+    pkg_info = ctx.attr.src[NixInfo]
+    
+    # Construct config
+    mounts = {}
+    for f, p in pkg_info.store_paths.items():
+        mounts[f.short_path] = p
+
+    env = {}
+    for k, v in pkg_info.env.items():
+        env[k] = v
+
+    config = {
+        "mounts": mounts,
+        "env": env,
+        "command": ctx.attr.startup_cmd,
+        "args": [],
+        "work_dir": "", # Default
+        "impure": False,
+    }
+
+    ctx.actions.write(config_out, json.encode(config))
+
+    # Create symlink to runner
+    ctx.actions.symlink(
+        output = out,
+        target_file = ctx.executable._runner,
+        is_executable = True,
+    )
+
+    # Merge runfiles
+    runfiles = ctx.runfiles(files = [config_out, ctx.executable._runner])
+    runfiles = runfiles.merge(ctx.attr.src[DefaultInfo].default_runfiles)
+    
+    return [DefaultInfo(executable = out, runfiles = runfiles)]
+
+nix_flake_run_under = rule(
+    implementation = _nix_flake_run_under_impl,
+    attrs = {
+        "src": attr.label(mandatory = True, providers = [NixInfo]),
+        "startup_cmd": attr.string(doc = "Optional command to execute on startup (before args)."),
+        "_runner": attr.label(default = Label("//cmd/nix_runner"), executable = True, cfg = "target"),
+    },
+    executable = True,
+)
+
+def _debug_rule_impl(ctx):
+    runfiles = ctx.runfiles()
+    for dep in ctx.attr.deps:
+        runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
+    
+    executable = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(executable, "#!/bin/bash\necho Runfiles Debug", is_executable=True)
+    return [DefaultInfo(executable=executable, runfiles=runfiles)]
+
+debug_rule = rule(implementation=_debug_rule_impl, attrs={"deps": attr.label_list()}, executable=True)
+
 

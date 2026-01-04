@@ -2,14 +2,13 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "sandbox",
-    srcs = [
-        "builtins.go",
-        "bwrap.go",
-        "copier.go",
-        "manifest.go",
-        "resolve.go",
-        "runfiles.go",
-    ],
+    srcs = glob(["*.go"]),
     importpath = "github.com/JonathanPerry651/nix-bazel-via-bwrap/pkg/sandbox",
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"]),
     visibility = ["//visibility:public"],
 )
