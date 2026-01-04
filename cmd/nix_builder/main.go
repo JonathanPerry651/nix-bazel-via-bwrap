@@ -144,9 +144,17 @@ func main() {
 			},
 			WorkDir:       "/build",
 			StandardSetup: true,
-			AdditionalRoBinds: []string{
-				"/home/jonathanp/.cache/bazel",
-			},
+			AdditionalRoBinds: func() []string {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return nil
+				}
+				cache := filepath.Join(home, ".cache", "bazel")
+				if _, err := os.Stat(cache); err == nil {
+					return []string{cache}
+				}
+				return nil
+			}(),
 		}
 
 		// Inject Output Paths as Environment Variables

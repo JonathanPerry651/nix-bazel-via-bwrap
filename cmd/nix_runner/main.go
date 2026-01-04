@@ -77,8 +77,6 @@ func main() {
 	}
 
 	// 4. Configure Sandbox
-	projectRoot := "/home/jonathanp/github/nix-bazel-via-bwrap"
-
 	finalMounts := make(map[string]string)
 	for s, h := range mounts {
 		absHost, err := filepath.EvalSymlinks(h)
@@ -88,15 +86,23 @@ func main() {
 		finalMounts[s] = absHost
 	}
 
+	// Detect specific host paths that might be needed (e.g. Bazel cache)
+	// This replaces the hardcoded list with a dynamic check
+	var additionalBinds []string
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		cachePath := filepath.Join(homeDir, ".cache", "bazel")
+		if _, err := os.Stat(cachePath); err == nil {
+			additionalBinds = append(additionalBinds, cachePath)
+		}
+	}
+
 	cfg := sandbox.SandboxConfig{
-		Mounts:        finalMounts,
-		Envs:          make(map[string]string),
-		WorkDir:       workDir,
-		StandardSetup: true,
-		AdditionalRoBinds: []string{
-			"/home/jonathanp/.cache/bazel",
-			projectRoot,
-		},
+		Mounts:            finalMounts,
+		Envs:              make(map[string]string),
+		WorkDir:           workDir,
+		StandardSetup:     true,
+		AdditionalRoBinds: additionalBinds,
 	}
 
 	for _, e := range os.Environ() {
