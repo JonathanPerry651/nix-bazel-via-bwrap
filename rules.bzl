@@ -249,25 +249,7 @@ def nix_package(name, flake = None, deps = [], **kwargs):
     """
     native.filegroup(name = name, **kwargs)
 
-def _nix_toolchain_info_impl(ctx):
-    # Construct env: base env + resolved paths
-    # We expand $(location ...) templates using the target
-    env = {}
-    for k, v in ctx.attr.env.items():
-        env[k] = ctx.expand_location(v, targets = [ctx.attr.target])
-        
-    return [platform_common.ToolchainInfo(
-        nix_target = ctx.attr.target,
-        env = env,
-    )]
 
-nix_toolchain_info = rule(
-    implementation = _nix_toolchain_info_impl,
-    attrs = {
-        "target": attr.label(mandatory = True),
-        "env": attr.string_dict(),
-    },
-)
 
 def _nix_tool_test_impl(ctx):
     # This is a generic test rule that consumes a hardcoded toolchain type (for now)

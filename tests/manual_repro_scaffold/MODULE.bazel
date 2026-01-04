@@ -40,5 +40,5 @@ nix_lock.from_file(
 )
 use_repo(nix_lock, "repro_cache", "repro_nixpkgs")
 
-# register_toolchains("//playwright_browsers:browsers_toolchain")
-register_toolchains("//toolchains:nix_sh_toolchain_linux")
+
+
