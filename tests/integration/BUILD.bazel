@@ -12,3 +12,9 @@ nix_integration_test(
     test_flake = "//tests/flakes/minimal_hello:flake.nix",
     test_runner = "test_hello.sh",
 )
+
+nix_integration_test(
+    name = "test_gazelle_update",
+    test_runner = "test_gazelle_update.sh",
+    test_flake = None,
+)
