@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ulikunitz/xz"
 )
@@ -150,8 +151,14 @@ func extractRegularFile(nr *NarReader, destPath string) error {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		return err
+	// Handle case where destPath is an existing directory (single-file NAR at root)
+	if info, err := os.Stat(destPath); err == nil && info.IsDir() {
+		// Use the basename of the store path as the filename, or "content" if unknown
+		destPath = filepath.Join(destPath, "content")
+	} else {
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return err
+		}
 	}
 
 	mode := os.FileMode(0644)
@@ -234,8 +241,26 @@ func extractSymlink(nr *NarReader, destPath string) error {
 		}
 	}
 
+	// Create parent directories first
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return err
+	}
+
+	// Skip symlinks that would dangle:
+	// 1. Absolute symlinks to /nix/store (resolved at runtime via mounts)
+	// 2. Relative symlinks where target doesn't exist (e.g., points to other store paths)
+	if strings.HasPrefix(target, "/nix/store/") {
+		return nil
+	}
+
+	// For relative symlinks, check if target would exist
+	resolvedTarget := target
+	if !filepath.IsAbs(target) {
+		resolvedTarget = filepath.Join(filepath.Dir(destPath), target)
+	}
+	if _, err := os.Stat(resolvedTarget); os.IsNotExist(err) {
+		// Target doesn't exist - skip this symlink to avoid Bazel validation error
+		return nil
 	}
 
 	return os.Symlink(target, destPath)

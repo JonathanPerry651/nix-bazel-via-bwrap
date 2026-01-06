@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/JonathanPerry651/nix-bazel-via-bwrap/cache"
@@ -210,9 +211,6 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 	// deps := inputsToDeps(inputs, args.Rel)
 	var deps []string
 
-	// Determine if this is a single-executable package
-	isSingleBinary, binaryName := detectSingleBinary(args.Config, args.Dir)
-
 	// Update lockfile with NixpkgsCommit if specified
 	if cfg.NixpkgsCommit != "" && l.lockFile != nil {
 		l.mu.Lock()
@@ -235,64 +233,64 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 		nixpkgsOverride = "github:NixOS/nixpkgs/" + cfg.NixpkgsCommit
 	}
 
-	storePath, drvHash, err := resolveFlakeOutput(args.Config, args.Dir, nixpkgsOverride)
+	storePath, drvHash, env, err := resolveFlakeOutput(args.Config, args.Dir, nixpkgsOverride)
 	if err != nil {
 		log.Printf("Warning: failed to resolve derivation for %s: %v", args.Dir, err)
-	} else {
-		// Update lockfile
-		label := "//" + args.Rel + ":default"
-		if args.Rel == "" {
-			label = "//:default"
-		}
-
-		var exePath string
-		if isSingleBinary {
-			exePath = "bin/" + binaryName
-		}
-
-		l.updateLockfile(label, storePath, drvHash, deps, exePath)
-
-		// Add cache dependency to ensure it is mounted
-		cacheName := cfg.CacheName
-		if cacheName == "" {
-			cacheName = "nix_cache"
-		}
-		// Assuming standard naming convention from extensions.bzl: s_<hash>
-		// Note: extensions.bzl uses the output path hash (from store_paths keys), NOT the derivation hash.
-		outputHash := cache.StoreHash(storePath)
-		depLabel := fmt.Sprintf("@%s//:s_%s", cacheName, outputHash)
-		deps = append(deps, depLabel)
 	}
+
+	// For mkShell flakes, extract dependencies from PATH in env
+	// instead of from the shell's own output store path
+	cacheName := cfg.CacheName
+	if cacheName == "" {
+		cacheName = "nix_cache"
+	}
+
+	// Extract dependencies from ALL env vars by scanning for /nix/store paths
+	// This captures PATH, JAVA_HOME, LD_LIBRARY_PATH, etc.
+	storePathRe := regexp.MustCompile(`/nix/store/([a-z0-9]{32}-[^/:]+)`)
+	seenPaths := make(map[string]bool)
+
+	for _, value := range env {
+		matches := storePathRe.FindAllStringSubmatch(value, -1)
+		for _, m := range matches {
+			storePath := "/nix/store/" + m[1]
+			if seenPaths[storePath] {
+				continue
+			}
+			seenPaths[storePath] = true
+
+			// Look up in cache to add as dependency
+			hash := cache.StoreHash(storePath)
+			info, err := l.cacheClient.LookupNarInfo(hash)
+			if err == nil && info != nil {
+				depLabel := fmt.Sprintf("@%s//:s_%s", cacheName, hash)
+				deps = append(deps, depLabel)
+				// Also crawl this dependency's closure
+				l.crawlClosure(storePath)
+			}
+		}
+	}
+
+	// Update lockfile with flake info (without the shell's own store path as a required dep)
+	label := "//" + args.Rel + ":default"
+	if args.Rel == "" {
+		label = "//:default"
+	}
+	l.updateLockfile(label, storePath, drvHash, deps, "", env)
 
 	var rules []*rule.Rule
 
-	// 1. Always generate 'nix_package' named 'default'
+	// Only generate 'nix_package' named 'default'
+	// Users define their own nix_flake_run_under targets
 	pkgRule := rule.NewRule("nix_package", "default")
 	pkgRule.SetAttr("flake", "flake.nix")
 	if len(deps) > 0 {
 		pkgRule.SetAttr("deps", deps)
 	}
-	rules = append(rules, pkgRule)
-
-	// 2. Always generate 'nix_flake_run_under' named 'run_under'
-	runUnderRule := rule.NewRule("nix_flake_run_under", "run_under")
-	runUnderRule.SetAttr("src", ":default")
-	rules = append(rules, runUnderRule)
-
-	if isSingleBinary && cfg.ExecutableMode != "disable" {
-		// 3. Generate 'nix_flake_run_under' for single-executable packages
-		// reusing the run_under logic but with a fixed startup command
-		r := rule.NewRule("nix_flake_run_under", binaryName)
-		r.SetAttr("src", ":default")
-		// Use absolute store path for startup command so it works inside sandbox (mapped at /nix/store)
-		if storePath != "" {
-			r.SetAttr("startup_cmd", storePath+"/bin/"+binaryName)
-		} else {
-			// Fallback if resolution failed (though usually we skip generation then)
-			r.SetAttr("startup_cmd", "bin/"+binaryName)
-		}
-		rules = append(rules, r)
+	if len(env) > 0 {
+		pkgRule.SetAttr("env", env)
 	}
+	rules = append(rules, pkgRule)
 
 	imports := make([]interface{}, len(rules))
 	for i := range rules {
@@ -305,73 +303,136 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 	}
 }
 
-// resolveFlakeOutput runs nix show-derivation to find the output store path and derivation hash.
-func resolveFlakeOutput(c *config.Config, dir string, nixpkgsOverride string) (storePath string, drvHash string, err error) {
-	nixPortable := findNixPortable(c)
-	if nixPortable == "" {
-		return "", "", nil
-	}
-
-	// We default to the 'default' package for now
-	args := []string{
-		"nix",
-		"--extra-experimental-features", "nix-command flakes",
-		"show-derivation", dir + "#default",
-	}
-	if nixpkgsOverride != "" {
-		args = append(args, "--override-input", "nixpkgs", nixpkgsOverride)
-	}
-
-	cmd := exec.Command(nixPortable, args...)
-	out, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			log.Printf("Warning: nix show-derivation failed: %s\nStderr: %s", err, exitErr.Stderr)
-		}
-		return "", "", err
-	}
-
-	// Parse map[string]Derivation
-	var drvs map[string]struct {
-		Outputs map[string]struct {
-			Path string `json:"path"`
-		} `json:"outputs"`
-	}
-	if err := json.Unmarshal(out, &drvs); err != nil {
-		return "", "", err
-	}
-
-	// There should be one root derivation (or we take the first one)
-	for path, drv := range drvs {
-		if out, ok := drv.Outputs["out"]; ok {
-			return out.Path, cache.StoreHash(path), nil
-		}
-	}
-	return "", "", nil
-}
-
 // updateLockfile queries the cache and updates the lockfile.
-func (l *nixLang) updateLockfile(label, storePath, drvHash string, deps []string, executable string) {
+func (l *nixLang) updateLockfile(label string, storePath string, drvHash string, deps []string, executable string, env map[string]string) {
 	if l.lockFile == nil {
 		return
-	}
-
-	// Crawl closure
-	closure, err := l.crawlClosure(storePath)
-	if err != nil {
-		log.Printf("Warning: failed to resolve closure for %s: %v", storePath, err)
-		// Fallback: just add the store path itself if possible?
-		// But AddFlake requires closure list.
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.lockFile.AddFlake(label, drvHash, storePath, executable, deps, closure)
+	// Query closure
+	closure := []string{}
+	// Only query closure if we have a valid store path and it's not a dummy
+	if storePath != "" && strings.HasPrefix(storePath, "/nix/store") {
+		c, err := l.crawlClosure(storePath)
+		if err != nil {
+			log.Printf("Warning: failed to resolve closure for %s: %v", storePath, err)
+			// Fallback: just add the store path itself if possible?
+			// But AddFlake requires closure list.
+		} else {
+			closure = c
+		}
+	}
+
+	l.lockFile.AddFlake(label, drvHash, storePath, executable, env, deps, closure)
 
 	if err := l.lockFile.Save(l.lockPath); err != nil {
-		log.Printf("Warning: failed to save lockfile: %v", err)
+		log.Fatalf("Error: failed to save lockfile: %v", err)
 	}
+}
+
+// resolveFlakeOutput runs 'nix show-derivation' and 'nix print-dev-env'.
+func resolveFlakeOutput(c *config.Config, dir, nixpkgsOverride string) (string, string, map[string]string, error) {
+	runNix := func(args ...string) ([]byte, error) {
+		// Heuristic to finding 'nix' or 'nix-portable'
+		// If we use 'findNixPortable', it returns a path found in runfiles or PATH.
+		bin := findNixPortable(c)
+		if bin == "" {
+			return nil, fmt.Errorf("nix binary not found")
+		}
+
+		// If bin ends in "nix-portable", assumes it needs "nix" as first arg for some commands?
+		// Actually for "show-derivation" and "print-dev-env" we need "nix".
+		// If bin IS "nix", we run "nix args...".
+		// If bin Is "nix-portable", we run "nix-portable nix args..."?
+		// Based on my research: YES.
+
+		realArgs := args
+		if strings.Contains(filepath.Base(bin), "nix-portable") {
+			realArgs = append([]string{"nix"}, args...)
+		}
+
+		cmd := exec.Command(bin, realArgs...)
+		cmd.Dir = dir
+		cmd.Env = os.Environ()
+
+		out, err := cmd.Output()
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				return out, fmt.Errorf("command %s %v failed: %w\nStderr: %s", bin, realArgs, err, exitErr.Stderr)
+			}
+			return out, fmt.Errorf("command %s %v failed: %w", bin, realArgs, err)
+		}
+		return out, nil
+	}
+
+	extraArgs := []string{"--extra-experimental-features", "nix-command flakes"}
+	if nixpkgsOverride != "" {
+		extraArgs = append(extraArgs, "--override-input", "nixpkgs", nixpkgsOverride)
+	}
+
+	// 1. Show Derivation
+	args1 := append([]string{"derivation", "show"}, extraArgs...)
+	args1 = append(args1, ".#default")
+
+	drvOut, err := runNix(args1...)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	var drvData map[string]interface{}
+	if err := json.Unmarshal(drvOut, &drvData); err != nil {
+		return "", "", nil, fmt.Errorf("failed to parse derivation: %w", err)
+	}
+
+	var drvHash, storePath string
+	for k, v := range drvData {
+		drvHash = k
+		outputs := v.(map[string]interface{})["outputs"].(map[string]interface{})
+		if out, ok := outputs["out"]; ok {
+			storePath = out.(map[string]interface{})["path"].(string)
+		}
+		break
+	}
+
+	// 2. Print Dev Env
+	args2 := append([]string{"print-dev-env", "--json"}, extraArgs...)
+	args2 = append(args2, ".#default")
+
+	envOut, err := runNix(args2...)
+	envMap := make(map[string]string)
+	if err == nil {
+		var envData struct {
+			Variables map[string]struct {
+				Type  string      `json:"type"`
+				Value interface{} `json:"value"`
+			} `json:"variables"`
+		}
+		if err := json.Unmarshal(envOut, &envData); err == nil {
+			for k, v := range envData.Variables {
+				if v.Type == "exported" {
+					if strVal, ok := v.Value.(string); ok {
+						envMap[k] = strVal
+					}
+				}
+			}
+		} else {
+			log.Printf("Warning: failed to unmarshal env output: %v", err)
+		}
+	} else {
+		log.Printf("Warning: failed to print-dev-env: %v", err)
+	}
+
+	return storePath, drvHash, envMap, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // crawlClosure recursively finds dependencies in the cache and populates StorePaths in lockfile.
@@ -443,7 +504,6 @@ func findNixPortable(c *config.Config) string {
 			if err == nil {
 				// Check simple stat
 				if _, err := os.Stat(loc); err == nil {
-					// log.Printf("DEBUG: Found nix-portable at %s", loc)
 					return loc
 				}
 			}

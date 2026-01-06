@@ -16,11 +16,12 @@ type LockFile struct {
 
 // FlakeInfo contains info about a resolved flake.
 type FlakeInfo struct {
-	DrvHash         string   `json:"drv_hash"`
-	Deps            []string `json:"deps,omitempty"`            // Build deps (other flakes)
-	OutputStorePath string   `json:"output_store_path"`         // Key into StorePaths
-	Executable      string   `json:"executable,omitempty"`      // Path to executable inside output
-	Closure         []string `json:"runtime_closure,omitempty"` // List of keys into StorePaths
+	DrvHash         string            `json:"drv_hash"`
+	Deps            []string          `json:"deps,omitempty"`            // Build deps (other flakes)
+	OutputStorePath string            `json:"output_store_path"`         // Key into StorePaths
+	Executable      string            `json:"executable,omitempty"`      // Path to executable inside output
+	Env             map[string]string `json:"env,omitempty"`             // Exported environment variables
+	Closure         []string          `json:"runtime_closure,omitempty"` // List of keys into StorePaths
 }
 
 // CacheEntry contains cache.nixos.org info for http_file generation.
@@ -95,12 +96,13 @@ func (lf *LockFile) AddStorePath(info *NarInfo) {
 }
 
 // AddFlake adds a flake entry.
-func (lf *LockFile) AddFlake(label, drvHash, outputStorePath, executable string, deps, closure []string) {
+func (lf *LockFile) AddFlake(label, drvHash, outputStorePath, executable string, env map[string]string, deps, closure []string) {
 	lf.Flakes[label] = FlakeInfo{
 		DrvHash:         drvHash,
 		Deps:            deps,
 		OutputStorePath: outputStorePath,
 		Executable:      executable,
+		Env:             env,
 		Closure:         closure,
 	}
 }

@@ -393,16 +393,82 @@ def _nix_flake_run_under_impl(ctx):
     mounts = {}
     for f, p in pkg_info.store_paths.items():
         mounts[f.short_path] = p
+        
+    # Resolve env_paths
+    # Map key (Env Var Name) -> Store Path of target
+    resolved_env_paths = {}
+    for target, env_var in ctx.attr.env_paths.items():
+        # Find store path for target
+        # Heuristic: verify target has NixInfo or use DefaultInfo.files to find mapping in pkg_info?
+        # Actually, the target must be in the closure of 'src' OR we need to add it to mounts & closure logic?
+        # Current rule only propagates 'src' runfiles.
+        # If env_paths introduces NEW dependencies not in 'src', we must add them to runfiles and mounts!
+        
+        # Simple case: assume target provides NixInfo (it should if it's from nix_lock)
+        if NixInfo in target:
+             # Merge closure/store paths to mounts
+             for f, p in target[NixInfo].store_paths.items():
+                 mounts[f.short_path] = p
+             
+             # The env var should point to the "main" output. 
+             # NixInfo.outputs map? or heuristic?
+             # NixInfo.outputs maps output_name -> File (sandbox path)
+             
+             # Fallback: Just peek at files.
+             files = target[DefaultInfo].files.to_list()
+             if files:
+                 # Find which file is mapped?
+                 # This is tricky because we only have File objects.
+                 # check store_paths map
+                 found_path = ""
+                 for f in files:
+                     if f in target[NixInfo].store_paths:
+                          found_path = target[NixInfo].store_paths[f]
+                          break
+                 if found_path:
+                      resolved_env_paths[env_var] = found_path
+                 else:
+                      # If not found, maybe it's a directory output?
+                      pass
+        else:
+             # Regular file target?
+             pass
 
     env = {}
     for k, v in pkg_info.env.items():
         env[k] = v
+    for k, v in resolved_env_paths.items():
+        env[k] = v
+
+    # Handle startup_cmd resolution
+    cmd = ctx.attr.startup_cmd
+    if cmd and not cmd.startswith("/"):
+        # Relative path logic
+        # If it has a slash (e.g. bin/java), resolve against store path.
+        # If it is a bare command (e.g. java), leave it for PATH lookup.
+        if "/" in cmd:
+             # Try to find common prefix or just use the store path of the first 'src' file
+             src_files = ctx.attr.src[DefaultInfo].files.to_list()
+             base_store_path = ""
+             if src_files:
+                 first_file = src_files[0]
+                 if first_file in pkg_info.store_paths:
+                     base_store_path = pkg_info.store_paths[first_file]
+             
+             if base_store_path:
+                  cmd = base_store_path + "/" + cmd
+        else:
+             # Bare command, assume in PATH
+             pass
+
+    # Expand $$ to $ in args (Bazel requires $$ for literal $ in some cases)
+    cmd_args = [a.replace("$$", "$") for a in ctx.attr.args]
 
     config = {
         "mounts": mounts,
         "env": env,
-        "command": ctx.attr.startup_cmd,
-        "args": [],
+        "command": cmd,
+        "args": cmd_args,
         "work_dir": "", # Default
         "impure": False,
     }
@@ -420,13 +486,18 @@ def _nix_flake_run_under_impl(ctx):
     runfiles = ctx.runfiles(files = [config_out, ctx.executable._runner])
     runfiles = runfiles.merge(ctx.attr.src[DefaultInfo].default_runfiles)
     
+    # Merge runfiles from env_paths targets
+    for target in ctx.attr.env_paths:
+         runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
+
     return [DefaultInfo(executable = out, runfiles = runfiles)]
 
 nix_flake_run_under = rule(
     implementation = _nix_flake_run_under_impl,
     attrs = {
         "src": attr.label(mandatory = True, providers = [NixInfo]),
-        "startup_cmd": attr.string(doc = "Optional command to execute on startup (before args)."),
+        "startup_cmd": attr.string(doc = "Optional command to execute on startup (before args). If relative, resolved against src."),
+        "env_paths": attr.label_keyed_string_dict(doc = "Map of targets to env vars. Sets env var to the store path of the target."),
         "_runner": attr.label(default = Label("//cmd/nix_runner"), executable = True, cfg = "target"),
     },
     executable = True,

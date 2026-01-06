@@ -137,7 +137,23 @@ def _nix_plugin_repo_impl(ctx):
     nixpkgs = ctx.attr.nixpkgs
     pkg_name = ctx.attr.go_package_name
     
-    # Generate plugin.go wrapper
+    # Calculate lockfile path relative to repo root
+    # l.lockfile is a label. We assume it's in the main workspace for now or path relative to execution root.
+    # NewLanguage needs a path that Gazelle can find relative to RepoRoot.
+    # The attribute is 'lockfile'. 
+    # Logic: if label package is empty -> at root. 
+    # Ideally we pass "nix_deps/nix.lock" or similar string from an attribute, but here we have a label.
+    # We will pass the package + name.
+    
+    lockfile_path = "nix_deps/nix.lock" # Default fallback
+    if ctx.attr.lockfile:
+         # Best effort: package + / + name
+         l = ctx.attr.lockfile
+         if l.package:
+             lockfile_path = l.package + "/" + l.name
+         else:
+             lockfile_path = l.name
+
     ctx.file("plugin.go", """
 package nix
 
@@ -147,9 +163,9 @@ import (
 )
 
 func NewLanguage() language.Language {
-    return nix.NewLanguage("%s")
+    return nix.NewLanguage("%s", "%s", "%s")
 }
-""" % str(nixpkgs))
+""" % (str(nixpkgs), ctx.attr.cache_name, lockfile_path))
 
     # Generate BUILD.bazel
     ctx.file("BUILD.bazel", """
@@ -164,7 +180,7 @@ go_library(
         "@nix_bazel_via_bwrap//pkg/gazelle/language/nix",
         "@gazelle//language",
     ],
-    data = ["%s"],
+    data = ["%s", "@nix_portable//file"],
 )
 """ % (pkg_name, str(nixpkgs)))
 
@@ -173,6 +189,8 @@ nix_plugin_repo = repository_rule(
     attrs = {
         "nixpkgs": attr.string(mandatory = True),
         "go_package_name": attr.string(mandatory = True),
+        "cache_name": attr.string(default = "nix_cache"),
+        "lockfile": attr.label(),
     },
 )
 
@@ -215,6 +233,8 @@ exports_files(glob(["**"]))
                 name = plugin_name,
                 nixpkgs = "@%s//:flake.nix" % tag.nixpkgs_name,
                 go_package_name = plugin_name,
+                cache_name = tag.name,
+                lockfile = tag.lockfile,
             )
 
 nix_lock_ext = module_extension(

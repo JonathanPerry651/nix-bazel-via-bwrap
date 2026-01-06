@@ -23,14 +23,17 @@ type nixLang struct {
 	lockFile     *cache.LockFile
 	lockPath     string
 	nixpkgsLabel string
+	cacheName    string
 	initialized  bool
 }
 
 // NewLanguage returns a new Nix language extension for Gazelle.
-func NewLanguage(nixpkgsLabel string) language.Language {
+func NewLanguage(nixpkgsLabel, cacheName, lockFile string) language.Language {
 	return &nixLang{
 		cacheClient:  cache.New(""), // Use default cache URL
 		nixpkgsLabel: nixpkgsLabel,
+		cacheName:    cacheName,
+		lockPath:     lockFile,
 	}
 }
 
@@ -80,7 +83,6 @@ func (*nixLang) KnownDirectives() []string {
 		"nix_flake",          // # gazelle:nix_flake enable/disable
 		"nix_executable",     // # gazelle:nix_executable auto/force/disable
 		"nix_nixpkgs_commit", // # gazelle:nix_nixpkgs_commit <sha>
-		"nix_cache_name",
 		"nix_nixpkgs_label",
 	}
 }

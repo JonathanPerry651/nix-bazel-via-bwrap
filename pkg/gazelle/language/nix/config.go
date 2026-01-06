@@ -53,7 +53,12 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 	if rel == "" {
 		l.mu.Lock()
 		if !l.initialized {
-			l.lockPath = filepath.Join(c.RepoRoot, "nix_deps", "nix.lock")
+			if l.lockPath == "" {
+				// Fallback if not provided (though it should be mandatory from Bzlmod)
+				l.lockPath = filepath.Join(c.RepoRoot, "nix_deps", "nix.lock")
+			} else if !filepath.IsAbs(l.lockPath) {
+				l.lockPath = filepath.Join(c.RepoRoot, l.lockPath)
+			}
 			lf, err := cache.LoadLockFile(l.lockPath)
 			if err != nil {
 				// Don't fail hard, just warn.
@@ -72,8 +77,11 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 		cfg = &NixConfig{
 			Enabled:        true,
 			ExecutableMode: "auto",
-			CacheName:      "nix_cache",
+			CacheName:      l.cacheName,
 			NixpkgsLabel:   l.nixpkgsLabel,
+		}
+		if cfg.CacheName == "" {
+			cfg.CacheName = "nix_cache"
 		}
 	}
 	c.Exts[nixName] = cfg
@@ -88,8 +96,6 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 				cfg.ExecutableMode = d.Value
 			case "nix_nixpkgs_commit":
 				cfg.NixpkgsCommit = d.Value
-			case "nix_cache_name":
-				cfg.CacheName = d.Value
 			case "nix_nixpkgs_label":
 				cfg.NixpkgsLabel = d.Value
 			}
