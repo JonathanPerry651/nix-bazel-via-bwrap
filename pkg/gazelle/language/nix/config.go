@@ -1,10 +1,8 @@
 package nix
 
 import (
-	"log"
 	"path/filepath"
 
-	"github.com/JonathanPerry651/nix-bazel-via-bwrap/cache"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
@@ -30,6 +28,8 @@ type NixConfig struct {
 	// NixpkgsLabel specifies a Bazel label (e.g. @nixpkgs//:src) pointing to the nixpkgs source.
 	// If set, this is resolved to an absolute path via runfiles and passed to nix show-derivation.
 	NixpkgsLabel string
+	// LockPath is the absolute path to the lockfile.
+	LockPath string
 }
 
 func (c *NixConfig) Clone() *NixConfig {
@@ -50,25 +50,7 @@ func GetNixConfig(c *config.Config) *NixConfig {
 
 // Configure implements language.Language.Configure.
 func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
-	if rel == "" {
-		l.mu.Lock()
-		if !l.initialized {
-			if l.lockPath == "" {
-				// Fallback if not provided (though it should be mandatory from Bzlmod)
-				l.lockPath = filepath.Join(c.RepoRoot, "nix_deps", "nix.lock")
-			} else if !filepath.IsAbs(l.lockPath) {
-				l.lockPath = filepath.Join(c.RepoRoot, l.lockPath)
-			}
-			lf, err := cache.LoadLockFile(l.lockPath)
-			if err != nil {
-				// Don't fail hard, just warn.
-				log.Printf("Warning: failed to load %s: %v", l.lockPath, err)
-			}
-			l.lockFile = lf
-			l.initialized = true
-		}
-		l.mu.Unlock()
-	}
+	// Root defaults handled in NewLanguage or below.
 
 	var cfg *NixConfig
 	if extra, ok := c.Exts[nixName]; ok {
@@ -79,9 +61,13 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 			ExecutableMode: "auto",
 			CacheName:      l.cacheName,
 			NixpkgsLabel:   l.nixpkgsLabel,
+			LockPath:       l.lockPath,
 		}
 		if cfg.CacheName == "" {
 			cfg.CacheName = "nix_cache"
+		}
+		if cfg.LockPath == "" {
+			cfg.LockPath = filepath.Join(c.RepoRoot, "nix_deps", "nix.lock")
 		}
 	}
 	c.Exts[nixName] = cfg
@@ -98,6 +84,14 @@ func (l *nixLang) Configure(c *config.Config, rel string, f *rule.File) {
 				cfg.NixpkgsCommit = d.Value
 			case "nix_nixpkgs_label":
 				cfg.NixpkgsLabel = d.Value
+			case "nix_cache_name":
+				cfg.CacheName = d.Value
+			case "nix_lockfile":
+				if filepath.IsAbs(d.Value) {
+					cfg.LockPath = d.Value
+				} else {
+					cfg.LockPath = filepath.Join(c.RepoRoot, d.Value)
+				}
 			}
 		}
 	}

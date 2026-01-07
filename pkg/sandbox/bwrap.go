@@ -18,6 +18,9 @@ type SandboxConfig struct {
 	// UseNamespaces enables --unshare-all, --proc /proc, --dev /dev, --tmpfs /tmp
 	UseNamespaces bool
 
+	// ShareNet allows network access inside the namespace
+	ShareNet bool
+
 	// Explicit list of host paths to mount (e.g. .cache)
 	AdditionalRoBinds []string
 }
@@ -60,6 +63,9 @@ func BuildBwrapArgs(cfg *SandboxConfig) ([]string, error) {
 			// Ensure /usr exists if we mount stuff under it?
 			"--dir", "/usr",
 		)
+		if cfg.ShareNet {
+			args = append(args, "--share-net")
+		}
 	}
 
 	// WorkDir

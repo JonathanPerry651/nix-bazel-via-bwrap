@@ -105,6 +105,43 @@ func main() {
 		}
 	}
 
+	// Ensure the builder itself is mounted if it's a relative path (Bazel result)
+	if !filepath.IsAbs(builder) {
+		hostPath := ""
+		// 1. Try relative to current directory (execroot)
+		if _, err := os.Stat(builder); err == nil {
+			hostPath, _ = filepath.Abs(builder)
+			log.Printf("DEBUG: Found builder (from CWD) %s", hostPath)
+		} else {
+			// 2. Try relative to runfiles
+			runfilesDir := os.Getenv("RUNFILES_DIR")
+			if runfilesDir == "" {
+				runfilesDir = os.Args[0] + ".runfiles"
+			}
+			hp := filepath.Join(runfilesDir, builder)
+			if _, err := os.Stat(hp); err == nil {
+				hostPath = hp
+				log.Printf("DEBUG: Found builder (from runfiles) %s", hostPath)
+			} else {
+				// Try with _main prefix for Bzlmod consistency
+				hp = filepath.Join(runfilesDir, "_main", builder)
+				if _, err := os.Stat(hp); err == nil {
+					hostPath = hp
+					log.Printf("DEBUG: Found builder (from runfiles _main) %s", hostPath)
+				}
+			}
+		}
+
+		if hostPath != "" {
+			// Mount at a fixed absolute path in sandbox to avoid relative path issues
+			// and avoid /bin which is read-only when mounted from host.
+			sandboxPath := "/nix-bazel/bin/nix"
+			mounts[sandboxPath] = hostPath
+			builder = sandboxPath
+			log.Printf("DEBUG: Mounted builder %s -> %s", hostPath, sandboxPath)
+		}
+	}
+
 	// Resolve mounts to host
 	finalMounts := make(map[string]string)
 	for s, h := range mounts {
@@ -143,7 +180,8 @@ func main() {
 				"TMPDIR":        "/build",
 				"HOME":          "/homeless-shelter",
 			},
-			WorkDir: "/build",
+			WorkDir:  "/build",
+			ShareNet: true,
 		}
 
 		// Always mount system libs for builder to ensure generic builders work (e.g. /bin/sh)
@@ -161,7 +199,20 @@ func main() {
 		cfg.Mounts["/etc/passwd"] = filepath.Join(etcDir, "passwd")
 		cfg.Mounts["/etc/group"] = filepath.Join(etcDir, "group")
 		cfg.Mounts["/etc/hosts"] = filepath.Join(etcDir, "hosts")
-		cfg.Mounts["/homeless-shelter"] = homelessDir
+
+		// DNS
+		if _, err := os.Stat("/etc/resolv.conf"); err == nil {
+			cfg.Mounts["/etc/resolv.conf"] = "/etc/resolv.conf"
+		}
+		// SSL Certs for downloads
+		sslPaths := []string{"/etc/ssl", "/etc/static/ssl", "/etc/pki", "/usr/share/ca-certificates"}
+		for _, p := range sslPaths {
+			if _, err := os.Stat(p); err == nil {
+				cfg.Mounts[p] = p
+			}
+		}
+
+		cfg.Binds["/homeless-shelter"] = homelessDir
 
 		// EnsureShell is now a method of SandboxConfig
 		// Note: StandardSetup(true) already mounts /bin etc, so this might not need to do much

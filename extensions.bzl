@@ -163,9 +163,9 @@ import (
 )
 
 func NewLanguage() language.Language {
-    return nix.NewLanguage("%s", "%s", "%s")
+    return nix.NewLanguage()
 }
-""" % (str(nixpkgs), ctx.attr.cache_name, lockfile_path))
+""")
 
     # Generate BUILD.bazel
     ctx.file("BUILD.bazel", """
@@ -195,8 +195,12 @@ nix_plugin_repo = repository_rule(
 )
 
 def _nix_lock_impl(ctx):
+    seen_repos = {}
     for mod in ctx.modules:
         for tag in mod.tags.from_file:
+            if tag.name in seen_repos:
+                continue
+            seen_repos[tag.name] = True
             nix_cache_repo(name = tag.name, lockfile = tag.lockfile)
 
             # Check for nixpkgs_commit and generate repo

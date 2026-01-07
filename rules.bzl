@@ -1,5 +1,5 @@
 NixInfo = provider(
-    fields = ["outputs", "out_hash", "closure", "store_paths", "env"],
+    fields = ["outputs", "out_hash", "closure", "store_paths", "env", "output_path"],
 )
 
 # ... (skip to nix_package)
@@ -49,14 +49,62 @@ def _nix_package_impl(ctx):
     for dep in ctx.attr.deps:
         runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
 
+    out_files = []
+    if ctx.attr.output_path and ctx.file.flake:
+        print("DEBUG: NixPackageBuild for %s, output_path=%s" % (ctx.label, ctx.attr.output_path))
+        # Materialize the flake output
+        out = ctx.actions.declare_directory(ctx.label.name + ".out")
+        out_files.append(out)
+        
+        # Construct arguments for nix_builder
+        # Usage: runner <builder> <realOutDirBase> [--mount host:sandbox...] -- [args...]
+        args = ctx.actions.args()
+        args.add(ctx.file._nix.path)
+        args.add(out.dirname)
+        
+        # We want to mount the flake file and its directory
+        args.add("--mount", "%s:%s" % (ctx.file.flake.path, ctx.file.flake.path))
+        
+        # Also mount the local nix-bazel-via-bwrap repo if referenced
+        # For now, we hardcode it or try to find it.
+        # Ideally this should be a dependency.
+        args.add("--mount", "/home/jonathanp/github/nix-bazel-via-bwrap:/home/jonathanp/github/nix-bazel-via-bwrap")
+        
+        # Define output mapping
+        args.add("--output", "out:%s" % ctx.attr.output_path)
+        
+        args.add("--")
+        args.add("build")
+        args.add("/" + ctx.file.flake.path + "#default") # Use absolute path in sandbox
+        args.add("--no-link")
+        args.add("--verbose")
+        args.add("--print-build-logs")
+        
+        ctx.actions.run(
+            outputs = [out],
+            inputs = depset(direct = [ctx.file.flake], transitive = [d[DefaultInfo].files for d in ctx.attr.deps]),
+            executable = ctx.executable._tool,
+            arguments = [args],
+            tools = [ctx.file._nix],
+            mnemonic = "NixPackageBuild",
+            use_default_shell_env = True,
+            execution_requirements = {
+                "no-sandbox": "1",
+                "local": "1",
+            }
+        )
+        all_files.append(depset([out]))
+        store_paths[out] = ctx.attr.output_path
+
     return [
-       DefaultInfo(files = depset(transitive=all_files), runfiles = runfiles),
+       DefaultInfo(files = depset(direct = out_files, transitive=all_files), runfiles = runfiles),
        NixInfo(
-           outputs = {}, 
+           outputs = {"out": out_files[0]} if out_files else {}, 
            out_hash = "",
            closure = depset(transitive=closure),
            store_paths = store_paths,
            env = ctx.attr.env,
+           output_path = ctx.attr.output_path,
        )
     ]
 
@@ -67,6 +115,16 @@ nix_package = rule(
         "srcs": attr.label_list(allow_files = True),
         "env": attr.string_dict(doc = "Environment variables exposed by this package"),
         "flake": attr.label(allow_single_file = True),
+        "output_path": attr.string(),
+        "_tool": attr.label(
+            default = Label("//cmd/nix_builder:nix_builder"),
+            executable = True,
+            cfg = "exec",
+        ),
+        "_nix": attr.label(
+            default = Label("@nix_portable//file"),
+            allow_single_file = True,
+        ),
     }
 )
 
@@ -383,8 +441,9 @@ nix_binary = rule(
 
 
 def _nix_flake_run_under_impl(ctx):
-    out = ctx.actions.declare_file(ctx.label.name)
-    config_out = ctx.actions.declare_file(ctx.label.name + ".nix-runner.json")
+    output_path = ctx.attr.output if ctx.attr.output else ctx.label.name
+    out = ctx.actions.declare_file(output_path)
+    config_out = ctx.actions.declare_file(output_path + ".nix-runner.json")
     
     # Provider-based configuration
     pkg_info = ctx.attr.src[NixInfo]
@@ -393,6 +452,12 @@ def _nix_flake_run_under_impl(ctx):
     mounts = {}
     for f, p in pkg_info.store_paths.items():
         mounts[f.short_path] = p
+
+    if pkg_info.output_path:
+        # If the package itself has a store path (e.g. local flake), we must mount it!
+        # Since it's an absolute Nix store path, we use it as both host and sandbox path.
+        # The runner handles absolute keys by using them directly as host paths.
+        mounts[pkg_info.output_path] = pkg_info.output_path
         
     # Resolve env_paths
     # Map key (Env Var Name) -> Store Path of target
@@ -444,16 +509,16 @@ def _nix_flake_run_under_impl(ctx):
     cmd = ctx.attr.startup_cmd
     if cmd and not cmd.startswith("/"):
         # Relative path logic
-        # If it has a slash (e.g. bin/java), resolve against store path.
-        # If it is a bare command (e.g. java), leave it for PATH lookup.
         if "/" in cmd:
-             # Try to find common prefix or just use the store path of the first 'src' file
-             src_files = ctx.attr.src[DefaultInfo].files.to_list()
-             base_store_path = ""
-             if src_files:
-                 first_file = src_files[0]
-                 if first_file in pkg_info.store_paths:
-                     base_store_path = pkg_info.store_paths[first_file]
+             base_store_path = pkg_info.output_path
+             
+             if not base_store_path:
+                  # Fallback to first file heuristic
+                  src_files = ctx.attr.src[DefaultInfo].files.to_list()
+                  if src_files:
+                      first_file = src_files[0]
+                      if first_file in pkg_info.store_paths:
+                          base_store_path = pkg_info.store_paths[first_file]
              
              if base_store_path:
                   cmd = base_store_path + "/" + cmd
@@ -475,22 +540,58 @@ def _nix_flake_run_under_impl(ctx):
 
     ctx.actions.write(config_out, json.encode(config))
 
-    # Create symlink to runner
+    # Create symlink to runner adjacent to config (to help with relative paths if needed)
+    runner_symlink = ctx.actions.declare_file(output_path + "-runner")
     ctx.actions.symlink(
-        output = out,
+        output = runner_symlink,
         target_file = ctx.executable._runner,
         is_executable = True,
     )
 
+    # Create wrapper script
+    # We use a shell script so java_runtime only sees a 'single file' output
+    # but the script knows where to find its runner and config.
+    wrapper_content = """#!/bin/bash
+# Find directory of this script
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXE_NAME="$(basename "$0")"
+exec "$DIR/$EXE_NAME-runner" --config="$DIR/$EXE_NAME.nix-runner.json" "$@"
+"""
+    ctx.actions.write(
+        output = out,
+        content = wrapper_content,
+        is_executable = True,
+    )
+
     # Merge runfiles
-    runfiles = ctx.runfiles(files = [config_out, ctx.executable._runner])
+    runfiles = ctx.runfiles(files = [out, config_out, runner_symlink, ctx.executable._runner])
     runfiles = runfiles.merge(ctx.attr.src[DefaultInfo].default_runfiles)
     
     # Merge runfiles from env_paths targets
     for target in ctx.attr.env_paths:
          runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
 
-    return [DefaultInfo(executable = out, runfiles = runfiles)]
+    # Collect all dependency files for support output group
+    # This ensures that when this target is used in a toolchain (via filegroup),
+    # all underlying Nix store paths are staged in the action's sandbox.
+    support_files = [config_out, runner_symlink]
+    transitive_support = [ctx.attr.src[NixInfo].closure]
+    for target in ctx.attr.env_paths:
+        if NixInfo in target:
+            transitive_support.append(target[NixInfo].closure)
+        else:
+            transitive_support.append(target[DefaultInfo].files)
+
+    return [
+        DefaultInfo(
+            executable = out,
+            files = depset([out]),
+            runfiles = runfiles
+        ),
+        OutputGroupInfo(
+            support = depset(support_files, transitive = transitive_support),
+        )
+    ]
 
 nix_flake_run_under = rule(
     implementation = _nix_flake_run_under_impl,
@@ -498,6 +599,7 @@ nix_flake_run_under = rule(
         "src": attr.label(mandatory = True, providers = [NixInfo]),
         "startup_cmd": attr.string(doc = "Optional command to execute on startup (before args). If relative, resolved against src."),
         "env_paths": attr.label_keyed_string_dict(doc = "Map of targets to env vars. Sets env var to the store path of the target."),
+        "output": attr.string(doc = "Custom output path for the wrapper binary (e.g. 'bin/java'). Defaults to the target name."),
         "_runner": attr.label(default = Label("//cmd/nix_runner"), executable = True, cfg = "target"),
     },
     executable = True,

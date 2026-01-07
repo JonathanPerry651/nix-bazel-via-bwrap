@@ -20,7 +20,7 @@ const nixName = "nix"
 type nixLang struct {
 	mu           sync.Mutex
 	cacheClient  *cache.Cache
-	lockFile     *cache.LockFile
+	lockFiles    map[string]*cache.LockFile
 	lockPath     string
 	nixpkgsLabel string
 	cacheName    string
@@ -28,12 +28,10 @@ type nixLang struct {
 }
 
 // NewLanguage returns a new Nix language extension for Gazelle.
-func NewLanguage(nixpkgsLabel, cacheName, lockFile string) language.Language {
+func NewLanguage() language.Language {
 	return &nixLang{
-		cacheClient:  cache.New(""), // Use default cache URL
-		nixpkgsLabel: nixpkgsLabel,
-		cacheName:    cacheName,
-		lockPath:     lockFile,
+		cacheClient: cache.New(""), // Use default cache URL
+		lockFiles:   make(map[string]*cache.LockFile),
 	}
 }
 
@@ -84,6 +82,8 @@ func (*nixLang) KnownDirectives() []string {
 		"nix_executable",     // # gazelle:nix_executable auto/force/disable
 		"nix_nixpkgs_commit", // # gazelle:nix_nixpkgs_commit <sha>
 		"nix_nixpkgs_label",
+		"nix_cache_name",
+		"nix_lockfile",
 	}
 }
 

@@ -194,6 +194,22 @@ type GenerateArgs = language.GenerateArgs
 // GenerateResult contains the result of rule generation.
 type GenerateResult = language.GenerateResult
 
+func (l *nixLang) getLockFile(path string) *cache.LockFile {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if lf, ok := l.lockFiles[path]; ok {
+		return lf
+	}
+
+	lf, err := cache.LoadLockFile(path)
+	if err != nil {
+		log.Fatalf("failed to load lockfile %s: %v", path, err)
+	}
+	l.lockFiles[path] = lf
+	return lf
+}
+
 // GenerateRules implements language.Language.GenerateRules.
 // It discovers flake.nix files and generates nix_package or sh_binary rules.
 func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
@@ -211,12 +227,15 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 	// deps := inputsToDeps(inputs, args.Rel)
 	var deps []string
 
+	// Load the correct lockfile
+	lf := l.getLockFile(cfg.LockPath)
+
 	// Update lockfile with NixpkgsCommit if specified
-	if cfg.NixpkgsCommit != "" && l.lockFile != nil {
+	if cfg.NixpkgsCommit != "" && lf != nil {
 		l.mu.Lock()
-		if l.lockFile.NixpkgsCommit != cfg.NixpkgsCommit {
-			l.lockFile.NixpkgsCommit = cfg.NixpkgsCommit
-			l.lockFile.Save(l.lockPath)
+		if lf.NixpkgsCommit != cfg.NixpkgsCommit {
+			lf.NixpkgsCommit = cfg.NixpkgsCommit
+			lf.Save(cfg.LockPath)
 		}
 		l.mu.Unlock()
 	}
@@ -266,7 +285,7 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 				depLabel := fmt.Sprintf("@%s//:s_%s", cacheName, hash)
 				deps = append(deps, depLabel)
 				// Also crawl this dependency's closure
-				l.crawlClosure(storePath)
+				l.crawlClosure(lf, storePath)
 			}
 		}
 	}
@@ -276,7 +295,12 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 	if args.Rel == "" {
 		label = "//:default"
 	}
-	l.updateLockfile(label, storePath, drvHash, deps, "", env)
+	l.updateLockfile(lf, label, storePath, drvHash, deps, "", env)
+
+	// Save the correct lockfile
+	if err := lf.Save(cfg.LockPath); err != nil {
+		log.Fatalf("failed to save lockfile %s: %v", cfg.LockPath, err)
+	}
 
 	var rules []*rule.Rule
 
@@ -284,6 +308,8 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 	// Users define their own nix_flake_run_under targets
 	pkgRule := rule.NewRule("nix_package", "default")
 	pkgRule.SetAttr("flake", "flake.nix")
+	pkgRule.SetAttr("output_path", storePath)
+	pkgRule.SetAttr("visibility", []string{"//visibility:public"})
 	if len(deps) > 0 {
 		pkgRule.SetAttr("deps", deps)
 	}
@@ -304,8 +330,8 @@ func (l *nixLang) GenerateRules(args GenerateArgs) GenerateResult {
 }
 
 // updateLockfile queries the cache and updates the lockfile.
-func (l *nixLang) updateLockfile(label string, storePath string, drvHash string, deps []string, executable string, env map[string]string) {
-	if l.lockFile == nil {
+func (l *nixLang) updateLockfile(lf *cache.LockFile, label string, storePath string, drvHash string, deps []string, executable string, env map[string]string) {
+	if lf == nil {
 		return
 	}
 
@@ -316,7 +342,7 @@ func (l *nixLang) updateLockfile(label string, storePath string, drvHash string,
 	closure := []string{}
 	// Only query closure if we have a valid store path and it's not a dummy
 	if storePath != "" && strings.HasPrefix(storePath, "/nix/store") {
-		c, err := l.crawlClosure(storePath)
+		c, err := l.crawlClosure(lf, storePath)
 		if err != nil {
 			log.Printf("Warning: failed to resolve closure for %s: %v", storePath, err)
 			// Fallback: just add the store path itself if possible?
@@ -326,11 +352,7 @@ func (l *nixLang) updateLockfile(label string, storePath string, drvHash string,
 		}
 	}
 
-	l.lockFile.AddFlake(label, drvHash, storePath, executable, env, deps, closure)
-
-	if err := l.lockFile.Save(l.lockPath); err != nil {
-		log.Fatalf("Error: failed to save lockfile: %v", err)
-	}
+	lf.AddFlake(label, drvHash, storePath, executable, env, deps, closure)
 }
 
 // resolveFlakeOutput runs 'nix show-derivation' and 'nix print-dev-env'.
@@ -436,7 +458,7 @@ func min(a, b int) int {
 }
 
 // crawlClosure recursively finds dependencies in the cache and populates StorePaths in lockfile.
-func (l *nixLang) crawlClosure(rootPath string) ([]string, error) {
+func (l *nixLang) crawlClosure(lf *cache.LockFile, rootPath string) ([]string, error) {
 	queue := []string{rootPath}
 	visited := make(map[string]bool)
 	var closure []string
@@ -466,7 +488,7 @@ func (l *nixLang) crawlClosure(rootPath string) ([]string, error) {
 
 		// Add to LockFile
 		l.mu.Lock()
-		l.lockFile.AddStorePath(info)
+		lf.AddStorePath(info)
 		l.mu.Unlock()
 
 		// Enqueue References

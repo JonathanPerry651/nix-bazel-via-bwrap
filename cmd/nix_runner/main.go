@@ -13,9 +13,9 @@ import (
 
 func main() {
 
-	// 0. Check for adjacent config file (Symlink mode)
+	// 0. Environment discovery
 	exePath := os.Args[0]
-	configPath := exePath + ".nix-runner.json"
+	runfilesDir := os.Getenv("RUNFILES_DIR")
 
 	var (
 		cwd            string
@@ -23,9 +23,26 @@ func main() {
 		impureHostLibs bool
 		cmdToRun       string
 		cmdArgs        []string
+		explicitConfig string
 	)
+	configPath := exePath + ".nix-runner.json"
 	mounts := make(map[string]string)
 	extraEnvs := make(map[string]string)
+
+	// Pre-scan for --config
+	for i := 0; i < len(os.Args); i++ {
+		if strings.HasPrefix(os.Args[i], "--config=") {
+			explicitConfig = strings.TrimPrefix(os.Args[i], "--config=")
+			break
+		} else if os.Args[i] == "--config" && i+1 < len(os.Args) {
+			explicitConfig = os.Args[i+1]
+			break
+		}
+	}
+
+	if explicitConfig != "" {
+		configPath = explicitConfig
+	}
 
 	if _, err := os.Stat(configPath); err == nil {
 		// Load from config file
@@ -51,29 +68,37 @@ func main() {
 		cmdToRun = cfg.Command
 		cmdArgs = cfg.Args
 
-		// Resolve relative mounts against runfiles dir
+		// Resolve relative mounts
 		runfilesDirEnv := os.Getenv("RUNFILES_DIR")
 		if runfilesDirEnv == "" {
 			runfilesDirEnv = exePath + ".runfiles"
 		}
+		// If the inferred runfiles dir doesn't exist, we are in a sandbox
+		if _, err := os.Stat(runfilesDirEnv); err != nil {
+			runfilesDirEnv = ""
+		}
 
 		for k, v := range cfg.Mounts {
-			if !filepath.IsAbs(k) && runfilesDirEnv != "" {
-				// Handle Bazel external repo logic ../repo/path -> repo/path
-				if strings.HasPrefix(k, "../") {
-					k = k[3:]
-				} else if strings.HasPrefix(k, "external/") {
-					k = k[9:]
+			hostPath := k
+			if !filepath.IsAbs(k) {
+				if runfilesDirEnv != "" {
+					relPath := k
+					if strings.HasPrefix(relPath, "../") {
+						relPath = relPath[3:]
+					} else {
+						relPath = "_main/" + relPath
+					}
+					hostPath = filepath.Join(runfilesDirEnv, relPath)
 				} else {
-					// Assume main repo?
-					// For Bzlmod, main artifacts are usually under <module_name>/
-					// We might need to handle this later
-					k = "_main/" + k
+					// Sandbox layout: external repositories are under external/
+					if strings.HasPrefix(k, "../") {
+						hostPath = "external/" + k[3:]
+					} else {
+						hostPath = k
+					}
 				}
-				k = filepath.Join(runfilesDirEnv, k)
 			}
-			log.Printf("DEBUG: Resolved mount %s -> %s", k, v)
-			mounts[v] = k
+			mounts[v] = hostPath
 		}
 		for k, v := range cfg.Env {
 			extraEnvs[k] = v
@@ -114,7 +139,6 @@ func main() {
 					log.Printf("WARNING: Invalid mount format '%s', skipping.", val)
 				} else {
 					mounts[parts[1]] = parts[0]
-					log.Printf("DEBUG: Explicit mount: %s -> %s", parts[0], parts[1])
 				}
 				continue
 			}
@@ -136,30 +160,22 @@ func main() {
 
 	// 2. Auto-discovery (Conditional)
 	if autoEnv {
-		log.Printf("DEBUG: Starting auto-discovery (enabled)...")
 		autoPaths, err := sandbox.CollectNixPathsFromRunfiles(os.Args[0])
-		if err != nil {
-			log.Printf("WARNING: Runfiles discovery failed: %v", err)
-		} else {
-			log.Printf("DEBUG: Found %d mount paths", len(autoPaths))
+		if err == nil {
 			for k, v := range autoPaths {
-				// k is runfiles/host path, v is sandbox path (/nix/store/...)
-				// Prioritize explicit mounts: Only add if not present
 				if _, exists := mounts[v]; !exists {
 					mounts[v] = k
 				}
 			}
 		}
-	} else {
-		log.Printf("DEBUG: Auto-discovery disabled")
 	}
 
 	// 3. Mount Runfiles Root & PWD
-	runfilesDir := os.Getenv("RUNFILES_DIR")
+	const pwdPlaceholder = "." // Simplify
+	pwd, _ := os.Getwd()
 	if runfilesDir != "" {
 		mounts[runfilesDir] = runfilesDir
 	}
-	pwd, _ := os.Getwd()
 	if pwd != "" {
 		mounts[pwd] = pwd
 	}
@@ -184,34 +200,25 @@ func main() {
 	}
 
 	// 5. Environment Variables
-	// Base envs
 	cfg.Envs["PATH"] = "/bin:/usr/bin"
 	cfg.Envs["HOME"] = "/homeless-shelter"
 	cfg.Envs["NIX_STORE"] = "/nix/store"
 
-	// Add config envs
 	for k, v := range extraEnvs {
 		cfg.Envs[k] = v
 	}
 
 	// Auto-discover Envs from runfiles (Conditional)
 	if autoEnv {
-		log.Printf("DEBUG: Starting env discovery (enabled)...")
 		autoEnvs, err := sandbox.CollectEnvFromRunfiles(os.Args[0])
-		if err != nil {
-			log.Printf("WARNING: Env discovery failed: %v", err)
-		} else {
-			log.Printf("DEBUG: Found %d env vars", len(autoEnvs))
+		if err == nil {
 			for k, v := range autoEnvs {
-				// support $VAR expansion (e.g. PATH=$out/bin:$PATH)
 				expanded := os.Expand(v, func(key string) string {
 					return cfg.Envs[key]
 				})
 				cfg.Envs[k] = expanded
 			}
 		}
-	} else {
-		log.Printf("DEBUG: Env discovery disabled")
 	}
 
 	bwrapArgs, err := sandbox.BuildBwrapArgs(cfg)
